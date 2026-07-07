@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<html lang="ko"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="단타봇">
+<meta name="theme-color" content="#0d1420">
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="apple-touch-icon" href="/icon-180.png">
+<title>단타봇 조종석 · 체험판</title>
+<style>
+:root{--bg:#0d1420;--card:#18202f;--line:#273349;--tx:#e9eef8;--sub:#8fa3c8;--dim:#5f7396;
+      --pos:#ff5b5b;--neg:#4d8dff;--acc:#ffb020;--ok:#3ecf8e}
+*{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
+body{background:var(--bg);color:var(--tx);font-family:'Apple SD Gothic Neo','Malgun Gothic',sans-serif;
+     max-width:720px;margin:0 auto;padding:14px 12px 40px;font-variant-numeric:tabular-nums}
+h1{font-size:1.1rem}
+h1 small{color:var(--acc);font-size:.7rem;vertical-align:2px}
+.sub{color:var(--dim);font-size:.74rem;margin:2px 0 12px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px 14px;margin-bottom:10px}
+.ct{font-size:.78rem;color:var(--sub);margin-bottom:8px;font-weight:600}
+.badge{display:inline-block;border-radius:7px;padding:5px 10px;font-size:.75rem;font-weight:700;margin-right:6px}
+.b-run{background:#15301f;color:#3ecf8e;border:1px solid #1f4a2f}
+.b-halt{background:#3a2f16;color:#ffb020;border:1px solid #5a4a20}
+.b-off{background:#3a2323;color:#ff8f8f;border:1px solid #5a3030}
+.kgrid{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:10px}
+.kpi{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:10px 12px}
+.kpi .t{color:var(--dim);font-size:.66rem}
+.kpi .v{font-size:1.1rem;font-weight:800;margin-top:3px}
+.pos{color:var(--pos)}.neg{color:var(--neg)}.flat{color:var(--tx)}
+table{width:100%;border-collapse:collapse;font-size:.76rem}
+th,td{padding:6px 5px;border-bottom:1px solid #222c42;text-align:right;white-space:nowrap}
+th{color:var(--sub);font-weight:600}
+th:first-child,td:first-child{text-align:left}
+.tw{overflow-x:auto;-webkit-overflow-scrolling:touch}
+.dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:5px}
+.btns{display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px}
+.btns button{padding:13px 0;border-radius:10px;font-size:.85rem;font-weight:700;cursor:pointer;border:1px solid #33415e}
+.b1{background:#3a2f16;color:#ffb020;border-color:#5a4a20!important}
+.b2{background:#15301f;color:#3ecf8e;border-color:#1f4a2f!important}
+.b3{background:#3a2323;color:#ff8f8f;border-color:#5a3030!important}
+#err{color:#ff8f8f;font-size:.78rem;margin-top:8px;display:none}
+.upd{color:var(--dim);font-size:.68rem;text-align:right;margin-top:6px}
+</style></head>
+<body>
+<h1>🤖 단타봇 조종석 <small>TRIAL</small></h1>
+<div class="sub"><b style="color:#ffb020">체험판 · 폰 단독 실행</b> — 가상 장세에서 실제 매매규칙(진입/익절/손절/트레일링) 작동 · 1초≈3분, 하루 약 2분 · 장마감 후 ▶재개 = 새로운 장</div>
+<div id="root"><div class="card">연결 중…</div></div>
+<div class="card">
+  <div class="ct">원격 제어</div>
+  <div class="btns">
+    <button class="b1" onclick="cmd('halt','신규진입을 중지할까요?\\n(보유분 청산규칙은 계속 작동)')">⏸ 진입중지</button>
+    <button class="b2" onclick="cmd('resume','신규진입을 재개할까요?')">▶ 재개</button>
+    <button class="b3" onclick="cmd('liquidate','보유 포지션을 전량 시장가 청산합니다.\\n되돌릴 수 없습니다. 실행할까요?')">⚠ 전량청산</button>
+  </div>
+  <div id="err"></div>
+</div>
+
+<script>
+// ═══ 체험판 엔진: 폰 단독 실행 — 실제 매매규칙이 가상 장세에서 작동 (1초 ≈ 3분) ═══
+function RNG(){ let sp=null; return { u:Math.random,
+  g(mu,sd){ let z; if(sp!==null){z=sp;sp=null;} else{ let a,b,s;
+    do{a=2*Math.random()-1;b=2*Math.random()-1;s=a*a+b*b;}while(s>=1||s===0);
+    const m=Math.sqrt(-2*Math.log(s)/s); z=a*m; sp=b*m;} return mu+sd*z; } }; }
+const R=RNG();
+const STOCKS=[['삼성전자',81300],['카카오',58200],['현대차',252000],['기아',118300],
+  ['에코프로비엠',214500],['두산에너빌리티',31950],['한화오션',42800],['셀트리온',187500]];
+const PROFILES=[
+  {name:'안정', budget:1000000, tp:2.0, sl:-1.5, trailArm:1.5, trailDrop:0.8, maxPos:2},
+  {name:'공격', budget:2000000, tp:4.0, sl:-2.5, trailArm:2.5, trailDrop:1.2, maxPos:2}];
+const E={};
+function newDay(){
+  E.min=9*60; E.over=false; E.halted=false; E.liq=false;
+  E.pnl=0; E.count=0; E.trades=[];
+  E.stk=STOCKS.map(([n,p])=>({n, p, hist:[p], ev:null}));
+  E.pf=PROFILES.map(x=>({...x, pnl:0, count:0, pos:{}, traded:new Set()}));
+}
+newDay();
+function clockStr(){ const h=Math.floor(E.min/60), m=Math.floor(E.min%60);
+  return String(h).padStart(2,'0')+':'+String(m).padStart(2,'0'); }
+function trade(pf,side,nm,qty,px,pnl,rs){
+  E.trades.unshift({ts:'2026-07-07 '+clockStr()+':00', pf:pf.name, side, nm, qty, px, pnl, rs});
+  if(E.trades.length>15)E.trades.length=15;
+}
+function closePos(pf,s,pos,px,rs){
+  const pnl=Math.round((px-pos.entry)*pos.qty);
+  pf.pnl+=pnl; E.pnl+=pnl;
+  trade(pf,'SELL',s.n,pos.qty,px,pnl,rs+' ('+(((px/pos.entry-1)*100)>0?'+':'')+((px/pos.entry-1)*100).toFixed(2)+'%)');
+  delete pf.pos[s.n];
+}
+function tick(){
+  if(E.over) return;
+  E.min += 0.75;                                   // 1틱 = 45초 장중시간
+  for(const s of E.stk){
+    let d = R.g(0,0.0006);
+    if(!s.ev && R.u()<0.004 && E.min<14.6*60)
+      s.ev={left:12+Math.floor(R.u()*10), drift:0.002+R.u()*0.0015, dump:R.u()<0.35, phase:'up'};
+    if(s.ev){
+      if(s.ev.phase==='up'){ d+=s.ev.drift; if(--s.ev.left<=0)
+        s.ev = s.ev.dump ? {left:16, drift:-0.0028, dump:false, phase:'dn'} : null; }
+      else { d+=s.ev.drift; if(--s.ev.left<=0) s.ev=null; }
+    }
+    s.p=Math.max(100, s.p*(1+d));
+    s.hist.push(s.p); if(s.hist.length>24)s.hist.shift();
+  }
+  // 청산 판단 (실제 규칙: 손절/익절/트레일링)
+  for(const pf of E.pf) for(const s of E.stk){
+    const pos=pf.pos[s.n]; if(!pos)continue;
+    if(s.p>pos.peak)pos.peak=s.p;
+    const r=(s.p/pos.entry-1)*100, pk=(pos.peak/pos.entry-1)*100;
+    if(r<=pf.sl) closePos(pf,s,pos,s.p,'손절');
+    else if(r>=pf.tp) closePos(pf,s,pos,s.p,'익절');
+    else if(pk>=pf.trailArm && (pos.peak-s.p)/pos.peak*100>=pf.trailDrop)
+      closePos(pf,s,pos,s.p,'트레일링스탑');
+  }
+  // 진입 신호: 최근 20틱 +1.5% 급등 편승
+  if(!E.halted && E.min<14.83*60){
+    for(const s of E.stk){
+      if(s.hist.length<21)continue;
+      const rise=s.p/s.hist[0]-1;
+      if(rise>=0.015){
+        for(const pf of E.pf){
+          if(pf.traded.has(s.n)||pf.pos[s.n]||Object.keys(pf.pos).length>=pf.maxPos)continue;
+          const qty=Math.max(1,Math.floor(pf.budget/s.p));
+          pf.pos[s.n]={entry:s.p, peak:s.p, qty};
+          pf.traded.add(s.n); pf.count++; E.count++;
+          trade(pf,'BUY',s.n,qty,s.p,0,'volume_spike');
+        }
+      }
+    }
+  }
+  // 원격 전량청산 / 15:10 장마감 청산
+  if(E.liq){ E.liq=false;
+    for(const pf of E.pf) for(const s of E.stk) if(pf.pos[s.n]) closePos(pf,s,pf.pos[s.n],s.p,'원격 전량청산'); }
+  if(E.min>=15.166*60){
+    for(const pf of E.pf) for(const s of E.stk) if(pf.pos[s.n]) closePos(pf,s,pf.pos[s.n],s.p,'장마감 전량청산');
+    E.over=true;
+  }
+}
+setInterval(tick, 250);
+window.fetch = async (url) => {
+  const ok={ok:true,status:200};
+  if(url.includes('/api/status'))
+    return {...ok, json:async()=>({mode:'DRY_RUN(체험판)', session:!E.over, halted:E.halted,
+      pnl:Math.round(E.pnl), count:E.count, watch:E.stk.length,
+      profiles:E.pf.map(p=>({name:p.name, pnl:Math.round(p.pnl), count:p.count,
+        positions:E.stk.filter(s=>p.pos[s.n]).map(s=>({code:'', name:s.n,
+          qty:p.pos[s.n].qty, entry:Math.round(p.pos[s.n].entry), cur:Math.round(s.p)}))})),
+      trades:E.trades,
+      time:clockStr()+' (장중시계)'})};
+  if(url.includes('/api/halt'))   { E.halted=true;  return {...ok,json:async()=>({ok:true})}; }
+  if(url.includes('/api/resume')) { if(E.over){newDay();} E.halted=false; return {...ok,json:async()=>({ok:true})}; }
+  if(url.includes('/api/liquidate')){ E.liq=true; return {...ok,json:async()=>({ok:true})}; }
+  return {...ok,json:async()=>({})};
+};
+</script>
+<script>
+const demoStore={_m:{},getItem(k){return this._m[k]||null},setItem(k,v){this._m[k]=v}};
+let KEY = new URLSearchParams(location.search).get('key')
+       || demoStore.getItem('ck_key') || '';
+let asked = false;
+function askKey(){
+  if(asked) return; asked = true;
+  const t = prompt('접속 토큰을 입력하세요 (config.json의 monitor.token)');
+  if(t){ KEY = t.trim(); demoStore.setItem('ck_key', KEY); asked = false; poll(); }
+}
+const $ = id => document.getElementById(id);
+const fmt = n => Math.round(n).toLocaleString('ko-KR');
+const cls = n => n>0?'pos':(n<0?'neg':'flat');
+async function cmd(c, msg){
+  if(!confirm(msg)) return;
+  try{
+    const r = await fetch('/api/'+c+'?key='+encodeURIComponent(KEY), {method:'POST'});
+    if(!r.ok) throw new Error(await r.text());
+    poll();
+  }catch(e){ showErr('명령 실패: '+e.message); }
+}
+function showErr(m){ $('err').style.display='block'; $('err').innerText=m; }
+function render(d){
+  $('err').style.display='none';
+  const stBadge = !d.session ? '<span class="badge b-off">장외시간</span>'
+    : d.halted ? '<span class="badge b-halt">진입중지 (청산규칙 작동중)</span>'
+    : '<span class="badge b-run">가동중</span>';
+  let h = `<div class="card">${stBadge}<span class="badge" style="background:#101828;color:#8fa3c8;border:1px solid #273349">${d.mode}</span>
+    <span class="badge" style="background:#101828;color:#8fa3c8;border:1px solid #273349">감시 ${d.watch}종목</span></div>`;
+  h += `<div class="kgrid">
+    <div class="kpi"><div class="t">오늘 실현손익 (계좌)</div><div class="v ${cls(d.pnl)}">${d.pnl>0?'+':''}${fmt(d.pnl)}원</div></div>
+    <div class="kpi"><div class="t">오늘 매매 (전체)</div><div class="v flat">${d.count}회</div></div>
+  </div>`;
+  h += `<div class="card"><div class="ct">프로파일별 성과</div><div class="tw"><table>
+    <thead><tr><th>프로파일</th><th>손익</th><th>매매</th><th>보유</th></tr></thead><tbody>`;
+  for(const p of d.profiles)
+    h += `<tr><td>${p.name}</td><td class="${cls(p.pnl)}">${p.pnl>0?'+':''}${fmt(p.pnl)}</td>
+          <td>${p.count}</td><td>${p.positions.length}</td></tr>`;
+  h += `</tbody></table></div></div>`;
+  const allPos = d.profiles.flatMap(p=>p.positions.map(x=>({pf:p.name,...x})));
+  h += `<div class="card"><div class="ct">보유 포지션 (${allPos.length})</div>`;
+  if(allPos.length){
+    h += `<div class="tw"><table><thead><tr><th>프로파일</th><th>종목</th><th>수량</th><th>진입가</th><th>현재가</th><th>평가</th></tr></thead><tbody>`;
+    for(const p of allPos){
+      const r = p.cur ? (p.cur/p.entry-1)*100 : 0;
+      h += `<tr><td>${p.pf}</td><td>${p.name}</td><td>${p.qty}</td><td>${fmt(p.entry)}</td>
+            <td>${p.cur?fmt(p.cur):'-'}</td><td class="${cls(r)}">${r>0?'+':''}${r.toFixed(2)}%</td></tr>`;
+    }
+    h += `</tbody></table></div>`;
+  } else h += `<div style="color:#5f7396;font-size:.8rem">보유 없음</div>`;
+  h += `<div class="upd">갱신 ${d.time}</div></div>`;
+  h += `<div class="card"><div class="ct">오늘 매매내역 (최근 ${(d.trades||[]).length}건)</div>`;
+  if((d.trades||[]).length){
+    h += `<div class="tw"><table><thead><tr><th>시간</th><th>프로파일</th><th>종목</th><th>구분</th><th>손익</th></tr></thead><tbody>`;
+    for(const t of d.trades){
+      const buy = t.side==='BUY';
+      h += `<tr><td>${(t.ts||'').slice(11,16)}</td><td>${t.pf}</td><td>${t.nm}</td>
+            <td>${buy?'매수':t.rs}</td><td class="${buy?'flat':cls(t.pnl)}">${buy?'-':(t.pnl>0?'+':'')+fmt(t.pnl)}</td></tr>`;
+    }
+    h += `</tbody></table></div>`;
+  } else h += `<div style="color:#5f7396;font-size:.8rem">아직 매매 없음</div>`;
+  h += `</div>`;
+  $('root').innerHTML = h;
+}
+async function poll(){
+  try{
+    const r = await fetch('/api/status?key='+encodeURIComponent(KEY));
+    if(r.status===401){ showErr('인증 실패 — 토큰을 확인하세요'); askKey(); return; }
+    demoStore.setItem('ck_key', KEY);
+    render(await r.json());
+  }catch(e){ showErr('엔진 연결 끊김 — PC에서 프로그램이 실행 중인지 확인'); }
+}
+poll(); setInterval(poll, 2000);
+if('serviceWorker' in navigator && location.protocol.startsWith('http'))
+  addEventListener('load', () => Promise.resolve().catch(()=>{}));
+</script></body></html>
