@@ -5,7 +5,7 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="단타봇">
-<title>단타봇 조종석 · 체험판 v2.1</title>
+<title>단타봇 조종석 · 체험판 v2.2</title>
 <style>
 :root{--bg:#0d1420;--card:#18202f;--card2:#141b29;--line:#273349;--tx:#e9eef8;--sub:#8fa3c8;--dim:#5f7396;
       --pos:#ff5b5b;--neg:#4d8dff;--acc:#ffb020;--ok:#3ecf8e}
@@ -62,7 +62,7 @@ input[type=number],input[type=text]{background:#101828;border:1px solid var(--li
 .srow .r2 input{padding:8px 5px;font-size:.84rem}
 </style></head>
 <body>
-<h1>🤖 단타봇 조종석 <small>체험판 v2.1</small></h1>
+<h1>🤖 단타봇 조종석 <small>체험판 v2.2</small></h1>
 <div class="sub"><b style="color:#ffb020">폰 단독 실행 · 실제 시세 기반</b> — 시작 시 네이버 실시세를 받아오고(안되면 오늘자 스냅샷), 그 위에서 실제 매매규칙이 작동합니다. 가상 자금·주문이며 실제 거래가 아닙니다.</div>
 
 <!-- ═══ 설정 ═══ -->
@@ -130,26 +130,50 @@ const STOCKS=[
   {code:'018260', n:'삼성에스디에스', base:206500},
   {code:'009150', n:'삼성전기',       base:2031000}];
 
-// ═══════════ 실시세 조회 (CORS 프록시 경유 네이버 폴링 API) ═══════════
+// ═══════════ 실시세 조회: 배치 API(8종목 1요청) + 프록시 동시 경주 ═══════════
 const PROXIES=[
   u=>'https://corsproxy.io/?url='+encodeURIComponent(u),
-  u=>'https://api.allorigins.win/raw?url='+encodeURIComponent(u)];
+  u=>'https://api.allorigins.win/raw?url='+encodeURIComponent(u),
+  u=>'https://api.codetabs.com/v1/proxy?quest='+encodeURIComponent(u)];
 let bustSeq=0;
-async function fetchQuote(code){
-  // _ts+시퀀스로 매 요청 URL을 고유하게 → 프록시 캐시 무력화
-  const api=`https://polling.finance.naver.com/api/realtime/domestic/stock/${code}?_ts=${Date.now()}_${++bustSeq}`;
-  for(const p of PROXIES){
-    try{
-      const r=await Promise.race([fetch(p(api)),
-        new Promise((_,rj)=>setTimeout(()=>rj(new Error('timeout')),3000))]);
-      const j=await r.json();
-      const d=(j.datas&&j.datas[0])||j;
-      const raw=d.closePrice??d.nv??d.now??'';
-      const px=parseInt(String(raw).replace(/[^0-9]/g,''),10);
-      if(px>0) return px;
-    }catch(e){}
-  }
+function raceProxies(api, tmo){
+  // 프록시 3곳에 동시에 쏘고 먼저 성공한 JSON 채택 (실패 대기 없음)
+  return Promise.any(PROXIES.map(p=>
+    Promise.race([
+      fetch(p(api)).then(r=>{ if(!r.ok) throw new Error('http'); return r.json(); }),
+      new Promise((_,rj)=>setTimeout(()=>rj(new Error('timeout')), tmo))
+    ])));
+}
+async function batchQuote(codes){
+  // SERVICE_ITEM 폴링: 전 종목을 요청 1건으로 → {code: 현재가}
+  const api=`https://polling.finance.naver.com/api/realtime?query=SERVICE_ITEM:${codes.join(',')}&_ts=${Date.now()}_${++bustSeq}`;
+  try{
+    const j=await raceProxies(api, 2500);
+    const datas=j?.result?.areas?.[0]?.datas||[];
+    const out={};
+    for(const d of datas){
+      const px=parseInt(String(d.nv??d.closePrice??'').replace(/[^0-9]/g,''),10);
+      if(d.cd && px>0) out[d.cd]=px;
+    }
+    if(Object.keys(out).length) return out;
+  }catch(e){}
   return null;
+}
+async function fetchQuote(code){
+  // 단일 종목 폴백 (배치 실패 시)
+  const api=`https://polling.finance.naver.com/api/realtime/domestic/stock/${code}?_ts=${Date.now()}_${++bustSeq}`;
+  try{
+    const j=await raceProxies(api, 2500);
+    const d=(j.datas&&j.datas[0])||j;
+    const px=parseInt(String(d.closePrice??d.nv??'').replace(/[^0-9]/g,''),10);
+    if(px>0) return px;
+  }catch(e){}
+  return null;
+}
+async function fetchAll(codes){
+  const batch=await batchQuote(codes);
+  if(batch) return codes.map(c=>batch[c]||null);
+  return Promise.all(codes.map(c=>fetchQuote(c)));   // 폴백: 개별 병렬
 }
 
 // ═══════════ 프로파일 설정 UI ═══════════
@@ -184,7 +208,7 @@ window.setMode=m=>{ mode=m;
   $('md0').classList.toggle('on',m===0); $('md1').classList.toggle('on',m===1);
   $('mdhint').innerText = m===0
     ? '실제 현재가에서 출발해 압축된 하루(09:00→15:10)를 시뮬레이션합니다. 장 마감 후에도 이용 가능.'
-    : '전 종목을 3.5초 주기로 병렬 조회해 규칙 매매를 관전합니다 (포털·프록시 특성상 수 초 지연 가능). 평일 09:00~15:10 장중에만 의미 있고, 화면이 켜져 있어야 합니다.'; };
+    : '전 종목을 2.5초 주기 배치(요청 1건)로 조회해 규칙 매매를 관전합니다 (포털·프록시 특성상 수 초 지연 가능). 평일 09:00~15:10 장중에만 의미 있고, 화면이 켜져 있어야 합니다.'; };
 
 // ═══════════ 엔진 ═══════════
 function RNG(){ let sp=null; return { g(mu,sd){ let z;
@@ -239,7 +263,7 @@ function evalRules(s){
     }
   }
   if(E.halted||!inEntryWindow())return;
-  const L=s.hist.length, W=E.mode===0?20:17, TH=E.mode===0?0.015:0.005;  // 실시간: 약 1분 +0.5%
+  const L=s.hist.length, W=E.mode===0?20:24, TH=E.mode===0?0.015:0.005;  // 실시간: 약 1분 +0.5%
   if(L<W+1)return;
   if(s.p/s.hist[L-1-W]-1>=TH){
     for(const pf of E.pf){
@@ -288,12 +312,17 @@ async function tickLive(){
   if(polling)return;
   polling=true;
   try{
-    const rs=await Promise.all(E.stk.map(s=>fetchQuote(s.code)));
+    const rs=await fetchAll(E.stk.map(s=>s.code));
     const now=Date.now();
     rs.forEach((px,i)=>{
       const s=E.stk[i];
-      if(px){ if(px!==s.p)s.chg=now; s.p=px; s.live=true; s.upd=now;
-              pushHist(s); evalRules(s); }
+      if(!px)return;
+      if(!s.live){                    // 스냅샷 → 첫 실시세: 기준가·이력 재앵커 (허위 급등신호 방지)
+        s.open=px; s.hist=[px]; s.live=true;
+      }
+      if(px!==s.p)s.chg=now;
+      s.p=px; s.upd=now;
+      pushHist(s); evalRules(s);
     });
   }finally{ polling=false; }
 }
@@ -306,7 +335,7 @@ window.start=async()=>{
   }
   store.set('trial_profs', JSON.stringify(profs));
   $('setupmsg').innerText='실시세 조회 중… (몇 초 걸릴 수 있습니다)';
-  const rs=await Promise.all(STOCKS.map(s=>fetchQuote(s.code)));
+  const rs=await fetchAll(STOCKS.map(s=>s.code));
   const anchors=[]; let live=0;
   rs.forEach((px,i)=>{ anchors[i]=px||STOCKS[i].base; if(px)live++; });
   newSession(anchors, live);
@@ -315,7 +344,7 @@ window.start=async()=>{
   $('setup').classList.add('hide'); $('dash').classList.remove('hide');
   if(E.timer)clearInterval(E.timer);
   if(E.rt)clearInterval(E.rt);
-  E.timer=setInterval(E.mode===0?tickSim:tickLive, E.mode===0?250:3500);
+  E.timer=setInterval(E.mode===0?tickSim:tickLive, E.mode===0?250:2500);
   E.rt=setInterval(render,1000);
   render();
 };
@@ -331,7 +360,8 @@ window.cmd=c=>{
 };
 function render(){
   if(!E.on)return;
-  const src = E.liveCnt>0 ? `📡 실시세 ${E.liveCnt}/${STOCKS.length}종목 앵커` : `📷 스냅샷 시세 (${SNAP_DATE})`;
+  const liveNow=E.stk.filter(s=>s.live).length;
+  const src = liveNow>0 ? `📡 실시세 ${liveNow}/${STOCKS.length}종목` : `📷 스냅샷 시세 (${SNAP_DATE})`;
   const st = E.over?'<span class="badge b-off">장외시간 · ▶재개 = 새로운 장</span>'
     : E.halted?'<span class="badge b-halt">진입중지</span>':'<span class="badge b-run">가동중</span>';
   $('status').innerHTML = st
@@ -341,7 +371,7 @@ function render(){
   $('kpnl').innerHTML=`<span class="${cls(E.pnl)}">${E.pnl>0?'+':''}${fmt(E.pnl)}원</span>`;
   $('kcnt').innerText=E.count+'회';
   const nowMs=Date.now();
-  let h=`<div class="card"><div class="ct">감시 종목${E.mode===1?' · 3.5초 병렬 폴링':''}</div><div class="tw"><table>
+  let h=`<div class="card"><div class="ct">감시 종목${E.mode===1?' · 2.5초 배치 폴링':''}</div><div class="tw"><table>
     <thead><tr><th>종목</th><th>현재가</th><th>시작가대비</th><th>갱신</th></tr></thead><tbody>`;
   for(const s of E.stk){
     const r=(s.p/s.open-1)*100;
