@@ -5,7 +5,7 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="단타봇">
-<title>단타봇 조종석 · 체험판 v2.3</title>
+<title>단타봇 조종석 · 체험판 v2.4</title>
 <style>
 :root{--bg:#0d1420;--card:#18202f;--card2:#141b29;--line:#273349;--tx:#e9eef8;--sub:#8fa3c8;--dim:#5f7396;
       --pos:#ff5b5b;--neg:#4d8dff;--acc:#ffb020;--ok:#3ecf8e}
@@ -62,7 +62,7 @@ input[type=number],input[type=text]{background:#101828;border:1px solid var(--li
 .srow .r2 input{padding:8px 5px;font-size:.84rem}
 </style></head>
 <body>
-<h1>🤖 단타봇 조종석 <small>체험판 v2.3</small></h1>
+<h1>🤖 단타봇 조종석 <small>체험판 v2.4</small></h1>
 <div class="sub"><b style="color:#ffb020">폰 단독 실행 · 실제 시세 기반</b> — 시작 시 네이버 실시세를 받아오고(안되면 오늘자 스냅샷), 그 위에서 실제 매매규칙이 작동합니다. 가상 자금·주문이며 실제 거래가 아닙니다.</div>
 
 <!-- ═══ 설정 ═══ -->
@@ -131,18 +131,35 @@ const STOCKS=[
   {code:'009150', n:'삼성전기',       base:2031000}];
 
 // ═══════════ 실시세 조회: 배치 API(8종목 1요청) + 프록시 동시 경주 ═══════════
-const PROXIES=[
-  u=>'https://corsproxy.io/?url='+encodeURIComponent(u),
-  u=>'https://api.allorigins.win/raw?url='+encodeURIComponent(u),
-  u=>'https://api.codetabs.com/v1/proxy?quest='+encodeURIComponent(u)];
-let bustSeq=0;
-function raceProxies(api, tmo){
-  // 프록시 3곳에 동시에 쏘고 먼저 성공한 JSON 채택 (실패 대기 없음)
-  return Promise.any(PROXIES.map(p=>
-    Promise.race([
-      fetch(p(api)).then(r=>{ if(!r.ok) throw new Error('http'); return r.json(); }),
-      new Promise((_,rj)=>setTimeout(()=>rj(new Error('timeout')), tmo))
-    ])));
+const PROXY_DEFS=[
+  {wrap:u=>'https://corsproxy.io/?url='+encodeURIComponent(u),
+   parse:r=>r.json()},
+  {wrap:u=>'https://api.allorigins.win/raw?url='+encodeURIComponent(u),
+   parse:r=>r.json()},
+  {wrap:u=>'https://api.codetabs.com/v1/proxy?quest='+encodeURIComponent(u),
+   parse:r=>r.json()},
+  {wrap:u=>'https://api.allorigins.win/get?url='+encodeURIComponent(u),
+   parse:async r=>{const j=await r.json(); return JSON.parse(j.contents);}}];
+let bustSeq=0, goodProxy=-1;
+function _tmo(ms){ return new Promise((_,rj)=>setTimeout(()=>rj(new Error('timeout')),ms)); }
+async function _via(i, api, tmo){
+  const p=PROXY_DEFS[i];
+  const r=await Promise.race([fetch(p.wrap(api)), _tmo(tmo)]);
+  if(!r.ok) throw new Error('http '+r.status);
+  const j=await p.parse(r);
+  goodProxy=i;                       // 성공 프록시 기억 → 평시 사이클당 요청 1건
+  return j;
+}
+async function raceProxies(api, tmo){
+  if(goodProxy>=0){
+    try{ return await _via(goodProxy, api, tmo); }
+    catch(e){ goodProxy=-1; }        // 죽으면 전체 경주로 복귀
+  }
+  try{
+    return await Promise.any(PROXY_DEFS.map((_,i)=>_via(i, api, tmo)));
+  }catch(e){
+    const err=new Error('proxyDown'); err.proxyDown=true; throw err;  // 프록시 전멸 신호
+  }
 }
 function parseDatas(j){
   const list=j?.datas || j?.result?.areas?.[0]?.datas || [];
@@ -154,37 +171,47 @@ function parseDatas(j){
   }
   return Object.keys(out).length?out:null;
 }
+let goodBatch='A';
+async function _batch(kind, codes){
+  const api = kind==='A'
+    ? `https://polling.finance.naver.com/api/realtime/domestic/stock/${codes.join(',')}?_ts=${Date.now()}_${++bustSeq}`
+    : `https://polling.finance.naver.com/api/realtime?query=SERVICE_ITEM:${codes.join(',')}&_ts=${Date.now()}_${++bustSeq}`;
+  const out=parseDatas(await raceProxies(api, 2500));
+  if(!out) throw new Error('empty');
+  goodBatch=kind;
+  return {out, path:'배치'+kind};
+}
 async function batchQuote(codes){
-  // 1순위: 단일종목 엔드포인트의 콤마 배치형 (단일형은 동작 검증됨)
-  try{
-    const api=`https://polling.finance.naver.com/api/realtime/domestic/stock/${codes.join(',')}?_ts=${Date.now()}_${++bustSeq}`;
-    const out=parseDatas(await raceProxies(api, 2500));
-    if(out) return {out, path:'배치A'};
-  }catch(e){}
-  // 2순위: 구형 SERVICE_ITEM 폴링
-  try{
-    const api=`https://polling.finance.naver.com/api/realtime?query=SERVICE_ITEM:${codes.join(',')}&_ts=${Date.now()}_${++bustSeq}`;
-    const out=parseDatas(await raceProxies(api, 2500));
-    if(out) return {out, path:'배치B'};
-  }catch(e){}
-  return null;
+  const first=goodBatch, second=first==='A'?'B':'A';
+  for(const k of [first, second]){
+    try{ return await _batch(k, codes); }
+    catch(e){ if(e&&e.proxyDown) return {down:true}; }  // 프록시 전멸 → 즉시 중단 (요청 낭비 금지)
+  }
+  return null;   // 프록시는 살아있는데 배치 형식이 안 맞는 경우만 개별 폴백
 }
 async function fetchQuote(code){
-  // 단일 종목 폴백 (배치 실패 시)
+  // 단일 종목 폴백 (배치 실패 시) — 프록시 전멸은 상위로 전파
   const api=`https://polling.finance.naver.com/api/realtime/domestic/stock/${code}?_ts=${Date.now()}_${++bustSeq}`;
   try{
     const j=await raceProxies(api, 2500);
     const d=(j.datas&&j.datas[0])||j;
     const px=parseInt(String(d.closePrice??d.nv??'').replace(/[^0-9]/g,''),10);
     if(px>0) return px;
-  }catch(e){}
+  }catch(e){ if(e&&e.proxyDown) throw e; }
   return null;
 }
 async function fetchAll(codes){
   const b=await batchQuote(codes);
-  if(b) return {list:codes.map(c=>b.out[c]||null), path:b.path};
-  const list=await Promise.all(codes.map(c=>fetchQuote(c)));   // 폴백: 개별 병렬
-  return {list, path:'개별'};
+  if(b&&b.out) return {list:codes.map(c=>b.out[c]||null), path:b.path};
+  if(b&&b.down) return {list:codes.map(()=>null), path:'프록시전멸'};
+  // 배치 전멸 → 폭주 방지: 절반만 순차 조회 (다음 사이클에 나머지)
+  const list=codes.map(()=>null);
+  fetchAll._half=!fetchAll._half;
+  for(let i=fetchAll._half?0:1; i<codes.length; i+=2){
+    try{ list[i]=await fetchQuote(codes[i]); }
+    catch(e){ if(e&&e.proxyDown) break; }
+  }
+  return {list, path:'개별(축소)'};
 }
 
 // ═══════════ 프로파일 설정 UI ═══════════
@@ -321,14 +348,16 @@ async function tickLive(){
     return;
   }
   if(polling)return;
+  if(E.skip>0){ E.skip--; return; }            // 백오프 중
   polling=true;
   try{
     const fa=await fetchAll(E.stk.map(s=>s.code));
     const rs=fa.list;
     const now=Date.now();
     const okCnt=rs.filter(Boolean).length;
-    E.diag={t:new Date().toTimeString().slice(0,8), ok:okCnt, path:fa.path,
-            fails: okCnt? 0 : (E.diag?.fails||0)+1};
+    const fails = okCnt? 0 : (E.diag?.fails||0)+1;
+    E.skip = okCnt? 0 : Math.min(2**fails, 12); // 실패 누적 시 2→4→8→12사이클(최대 30초) 휴지
+    E.diag={t:new Date().toTimeString().slice(0,8), ok:okCnt, path:fa.path, fails};
     rs.forEach((px,i)=>{
       const s=E.stk[i];
       if(!px)return;
@@ -402,7 +431,7 @@ function render(){
   if(E.mode===1){
     const d0=E.diag||{};
     const warn=(d0.fails||0)>=3;
-    h+=`<div class="hint" style="margin-top:6px;${warn?'color:#ff8f8f':''}">폴링: ${d0.t||'-'} · 경로 ${d0.path||'-'} · 성공 ${d0.ok??0}/${E.stk.length}종목${warn?` · 연속실패 ${d0.fails}회 — 프록시 막힘, 새로고침하거나 잠시 후 재시도`:''}</div>`;
+    h+=`<div class="hint" style="margin-top:6px;${warn?'color:#ff8f8f':''}">폴링: ${d0.t||'-'} · 경로 ${d0.path||'-'} · 성공 ${d0.ok??0}/${E.stk.length}종목${E.skip>0?` · 프록시 휴지 ${Math.round(E.skip*2.5)}초`:''}${warn?` · 연속실패 ${d0.fails}회 — 프록시가 잠시 막혔습니다. 자동으로 간격을 늘려 재시도 중`:''}</div>`;
     if(marketClosed()) h+=`<div class="hint" style="color:#ffb020">지금은 장외시간 — 가격이 멈춰 있는 게 정상입니다 (평일 09:00~15:10 장중에 시도)</div>`;
   }
   h+=`</div>`;
