@@ -5,7 +5,7 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="단타봇">
-<title>단타봇 조종석 · 체험판 v2.2</title>
+<title>단타봇 조종석 · 체험판 v2.3</title>
 <style>
 :root{--bg:#0d1420;--card:#18202f;--card2:#141b29;--line:#273349;--tx:#e9eef8;--sub:#8fa3c8;--dim:#5f7396;
       --pos:#ff5b5b;--neg:#4d8dff;--acc:#ffb020;--ok:#3ecf8e}
@@ -62,7 +62,7 @@ input[type=number],input[type=text]{background:#101828;border:1px solid var(--li
 .srow .r2 input{padding:8px 5px;font-size:.84rem}
 </style></head>
 <body>
-<h1>🤖 단타봇 조종석 <small>체험판 v2.2</small></h1>
+<h1>🤖 단타봇 조종석 <small>체험판 v2.3</small></h1>
 <div class="sub"><b style="color:#ffb020">폰 단독 실행 · 실제 시세 기반</b> — 시작 시 네이버 실시세를 받아오고(안되면 오늘자 스냅샷), 그 위에서 실제 매매규칙이 작동합니다. 가상 자금·주문이며 실제 거래가 아닙니다.</div>
 
 <!-- ═══ 설정 ═══ -->
@@ -144,18 +144,28 @@ function raceProxies(api, tmo){
       new Promise((_,rj)=>setTimeout(()=>rj(new Error('timeout')), tmo))
     ])));
 }
+function parseDatas(j){
+  const list=j?.datas || j?.result?.areas?.[0]?.datas || [];
+  const out={};
+  for(const d of list){
+    const code=d.itemCode||d.cd||'';
+    const px=parseInt(String(d.closePrice??d.nv??'').replace(/[^0-9]/g,''),10);
+    if(code && px>0) out[code]=px;
+  }
+  return Object.keys(out).length?out:null;
+}
 async function batchQuote(codes){
-  // SERVICE_ITEM 폴링: 전 종목을 요청 1건으로 → {code: 현재가}
-  const api=`https://polling.finance.naver.com/api/realtime?query=SERVICE_ITEM:${codes.join(',')}&_ts=${Date.now()}_${++bustSeq}`;
+  // 1순위: 단일종목 엔드포인트의 콤마 배치형 (단일형은 동작 검증됨)
   try{
-    const j=await raceProxies(api, 2500);
-    const datas=j?.result?.areas?.[0]?.datas||[];
-    const out={};
-    for(const d of datas){
-      const px=parseInt(String(d.nv??d.closePrice??'').replace(/[^0-9]/g,''),10);
-      if(d.cd && px>0) out[d.cd]=px;
-    }
-    if(Object.keys(out).length) return out;
+    const api=`https://polling.finance.naver.com/api/realtime/domestic/stock/${codes.join(',')}?_ts=${Date.now()}_${++bustSeq}`;
+    const out=parseDatas(await raceProxies(api, 2500));
+    if(out) return {out, path:'배치A'};
+  }catch(e){}
+  // 2순위: 구형 SERVICE_ITEM 폴링
+  try{
+    const api=`https://polling.finance.naver.com/api/realtime?query=SERVICE_ITEM:${codes.join(',')}&_ts=${Date.now()}_${++bustSeq}`;
+    const out=parseDatas(await raceProxies(api, 2500));
+    if(out) return {out, path:'배치B'};
   }catch(e){}
   return null;
 }
@@ -171,9 +181,10 @@ async function fetchQuote(code){
   return null;
 }
 async function fetchAll(codes){
-  const batch=await batchQuote(codes);
-  if(batch) return codes.map(c=>batch[c]||null);
-  return Promise.all(codes.map(c=>fetchQuote(c)));   // 폴백: 개별 병렬
+  const b=await batchQuote(codes);
+  if(b) return {list:codes.map(c=>b.out[c]||null), path:b.path};
+  const list=await Promise.all(codes.map(c=>fetchQuote(c)));   // 폴백: 개별 병렬
+  return {list, path:'개별'};
 }
 
 // ═══════════ 프로파일 설정 UI ═══════════
@@ -312,8 +323,12 @@ async function tickLive(){
   if(polling)return;
   polling=true;
   try{
-    const rs=await fetchAll(E.stk.map(s=>s.code));
+    const fa=await fetchAll(E.stk.map(s=>s.code));
+    const rs=fa.list;
     const now=Date.now();
+    const okCnt=rs.filter(Boolean).length;
+    E.diag={t:new Date().toTimeString().slice(0,8), ok:okCnt, path:fa.path,
+            fails: okCnt? 0 : (E.diag?.fails||0)+1};
     rs.forEach((px,i)=>{
       const s=E.stk[i];
       if(!px)return;
@@ -335,11 +350,13 @@ window.start=async()=>{
   }
   store.set('trial_profs', JSON.stringify(profs));
   $('setupmsg').innerText='실시세 조회 중… (몇 초 걸릴 수 있습니다)';
-  const rs=await fetchAll(STOCKS.map(s=>s.code));
+  const fa=await fetchAll(STOCKS.map(s=>s.code));
+  const rs=fa.list;
   const anchors=[]; let live=0;
   rs.forEach((px,i)=>{ anchors[i]=px||STOCKS[i].base; if(px)live++; });
   newSession(anchors, live);
   E.stk.forEach((s,i)=>s.live=!!rs[i]);
+  E.diag={t:new Date().toTimeString().slice(0,8), ok:live, path:fa.path, fails:live?0:1};
   $('setupmsg').innerText='';
   $('setup').classList.add('hide'); $('dash').classList.remove('hide');
   if(E.timer)clearInterval(E.timer);
@@ -381,7 +398,14 @@ function render(){
         <td class="${cls(r)}">${r>0?'+':''}${r.toFixed(2)}%</td>
         <td style="font-size:.66rem;color:var(--dim)">${E.mode===1?ago:(s.live?'📡':'📷')}</td></tr>`;
   }
-  h+=`</tbody></table></div></div>`;
+  h+=`</tbody></table></div>`;
+  if(E.mode===1){
+    const d0=E.diag||{};
+    const warn=(d0.fails||0)>=3;
+    h+=`<div class="hint" style="margin-top:6px;${warn?'color:#ff8f8f':''}">폴링: ${d0.t||'-'} · 경로 ${d0.path||'-'} · 성공 ${d0.ok??0}/${E.stk.length}종목${warn?` · 연속실패 ${d0.fails}회 — 프록시 막힘, 새로고침하거나 잠시 후 재시도`:''}</div>`;
+    if(marketClosed()) h+=`<div class="hint" style="color:#ffb020">지금은 장외시간 — 가격이 멈춰 있는 게 정상입니다 (평일 09:00~15:10 장중에 시도)</div>`;
+  }
+  h+=`</div>`;
   h+=`<div class="card"><div class="ct">프로파일별 성과</div><div class="tw"><table>
     <thead><tr><th>프로파일</th><th>규칙(익/손/발동/폭)</th><th>손익</th><th>매매</th><th>보유</th></tr></thead><tbody>`;
   for(const p of E.pf)
