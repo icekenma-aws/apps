@@ -5,7 +5,7 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="단타봇">
-<title>단타봇 조종석 · 체험판 v2.4</title>
+<title>단타봇 조종석 · 체험판 v2.5</title>
 <style>
 :root{--bg:#0d1420;--card:#18202f;--card2:#141b29;--line:#273349;--tx:#e9eef8;--sub:#8fa3c8;--dim:#5f7396;
       --pos:#ff5b5b;--neg:#4d8dff;--acc:#ffb020;--ok:#3ecf8e}
@@ -62,7 +62,7 @@ input[type=number],input[type=text]{background:#101828;border:1px solid var(--li
 .srow .r2 input{padding:8px 5px;font-size:.84rem}
 </style></head>
 <body>
-<h1>🤖 단타봇 조종석 <small>체험판 v2.4</small></h1>
+<h1>🤖 단타봇 조종석 <small>체험판 v2.5</small></h1>
 <div class="sub"><b style="color:#ffb020">폰 단독 실행 · 실제 시세 기반</b> — 시작 시 네이버 실시세를 받아오고(안되면 오늘자 스냅샷), 그 위에서 실제 매매규칙이 작동합니다. 가상 자금·주문이며 실제 거래가 아닙니다.</div>
 
 <!-- ═══ 설정 ═══ -->
@@ -85,6 +85,15 @@ input[type=number],input[type=text]{background:#101828;border:1px solid var(--li
     </div>
     <div class="hint">손절/트레일폭은 크기만 입력(자동 음수/하락폭 처리) · 실전 config.json의 profiles와 같은 항목</div>
   </div>
+
+  <details class="card" style="margin-bottom:10px">
+    <summary style="cursor:pointer;color:#8fa3c8;font-weight:600;font-size:.85rem">⚙ 내 전용 프록시 (실시간 끊김 해결 · 권장)</summary>
+    <label>Apps Script 웹앱 URL</label>
+    <input type="text" id="myproxy" placeholder="https://script.google.com/macros/s/.../exec" oninput="saveProxy(this.value)">
+    <div class="hint">공용 무료 프록시는 전 세계가 같이 써서 자주 막힙니다. 구글 Apps Script로 5분 만에 만드는
+    <b>내 전용 프록시</b>를 등록하면 사이클당 요청 1건을 내 할당량(하루 2만건)으로 처리해 끊김이 사라집니다.
+    비워두면 기존 공용 프록시 사용. 만드는 방법은 대화 안내 참조.</div>
+  </details>
 
   <button class="btn-go" onclick="start()">▶ 시작</button>
   <div class="hint" id="setupmsg" style="margin-top:8px"></div>
@@ -141,6 +150,8 @@ const PROXY_DEFS=[
   {wrap:u=>'https://api.allorigins.win/get?url='+encodeURIComponent(u),
    parse:async r=>{const j=await r.json(); return JSON.parse(j.contents);}}];
 let bustSeq=0, goodProxy=-1;
+let myProxy=(store.get('trial_proxy')||'').trim();
+window.saveProxy=v=>{ myProxy=(v||'').trim(); store.set('trial_proxy', myProxy); };
 function _tmo(ms){ return new Promise((_,rj)=>setTimeout(()=>rj(new Error('timeout')),ms)); }
 async function _via(i, api, tmo){
   const p=PROXY_DEFS[i];
@@ -171,6 +182,16 @@ function parseDatas(j){
   }
   return Object.keys(out).length?out:null;
 }
+async function dedicatedQuote(codes){
+  // 내 전용 프록시(Apps Script): ?codes=... 로 네이버 응답 원본을 그대로 중계
+  const sep=myProxy.includes('?')?'&':'?';
+  const url=`${myProxy}${sep}codes=${codes.join(',')}&_ts=${Date.now()}_${++bustSeq}`;
+  const r=await Promise.race([fetch(url), _tmo(3500)]);
+  if(!r.ok) throw new Error('http '+r.status);
+  const out=parseDatas(await r.json());
+  if(!out) throw new Error('empty');
+  return {out, path:'전용'};
+}
 let goodBatch='A';
 async function _batch(kind, codes){
   const api = kind==='A'
@@ -182,6 +203,9 @@ async function _batch(kind, codes){
   return {out, path:'배치'+kind};
 }
 async function batchQuote(codes){
+  if(myProxy){
+    try{ return await dedicatedQuote(codes); }catch(e){}   // 전용 실패 시 공용으로
+  }
   const first=goodBatch, second=first==='A'?'B':'A';
   for(const k of [first, second]){
     try{ return await _batch(k, codes); }
@@ -240,6 +264,7 @@ function draw(){
     </div></div>`).join('');
 }
 draw();
+if(document.getElementById('myproxy')) document.getElementById('myproxy').value=myProxy;
 
 let mode=0;
 window.setMode=m=>{ mode=m;
