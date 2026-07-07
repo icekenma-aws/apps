@@ -5,7 +5,7 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="단타봇">
-<title>단타봇 조종석 · 체험판 v2.5</title>
+<title>단타봇 조종석 · 체험판 v3.0</title>
 <style>
 :root{--bg:#0d1420;--card:#18202f;--card2:#141b29;--line:#273349;--tx:#e9eef8;--sub:#8fa3c8;--dim:#5f7396;
       --pos:#ff5b5b;--neg:#4d8dff;--acc:#ffb020;--ok:#3ecf8e}
@@ -62,7 +62,7 @@ input[type=number],input[type=text]{background:#101828;border:1px solid var(--li
 .srow .r2 input{padding:8px 5px;font-size:.84rem}
 </style></head>
 <body>
-<h1>🤖 단타봇 조종석 <small>체험판 v2.5</small></h1>
+<h1>🤖 단타봇 조종석 <small>체험판 v3.0</small></h1>
 <div class="sub"><b style="color:#ffb020">폰 단독 실행 · 실제 시세 기반</b> — 시작 시 네이버 실시세를 받아오고(안되면 오늘자 스냅샷), 그 위에서 실제 매매규칙이 작동합니다. 가상 자금·주문이며 실제 거래가 아닙니다.</div>
 
 <!-- ═══ 설정 ═══ -->
@@ -70,10 +70,23 @@ input[type=number],input[type=text]{background:#101828;border:1px solid var(--li
   <div class="card">
     <div class="ct">시세 모드</div>
     <div class="seg">
-      <button class="segbtn on" id="md0" onclick="setMode(0)">⏩ 압축 시뮬<br><span style="font-size:.66rem;color:var(--dim)">하루≈2분 · 실가격 출발</span></button>
+      <button class="segbtn on" id="md0" onclick="setMode(0)">📼 실데이터 리플레이<br><span style="font-size:.66rem;color:var(--dim)">과거 실제 분봉 · 압축 재생</span></button>
       <button class="segbtn" id="md1" onclick="setMode(1)">📡 실시간 관전<br><span style="font-size:.66rem;color:var(--dim)">실제 시세 폴링 · 장중용</span></button>
     </div>
-    <div class="hint" id="mdhint">실제 현재가에서 출발해 압축된 하루(09:00→15:10)를 시뮬레이션합니다. 장 마감 후에도 이용 가능.</div>
+    <div class="hint" id="mdhint">선택한 기간의 <b>실제 1분봉</b>(네이버)을 받아 압축 재생하며 매매규칙을 검증합니다. 장 마감 후에도 이용 가능.</div>
+    <div id="ropts" style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:10px">
+      <div><label style="margin-top:0">대상 기간 (최근 영업일)</label>
+        <select id="rdays" style="width:100%;background:#101828;border:1px solid var(--line);color:var(--tx);border-radius:8px;padding:9px 8px;font-size:.9rem">
+          <option value="1">1일</option><option value="3" selected>3일</option>
+          <option value="5">5일</option><option value="10">10일 (제공 한도까지)</option>
+        </select></div>
+      <div><label style="margin-top:0">재생 속도</label>
+        <select id="rspd" style="width:100%;background:#101828;border:1px solid var(--line);color:var(--tx);border-radius:8px;padding:9px 8px;font-size:.9rem">
+          <option value="150" selected>빠름 (1분봉=0.15초)</option>
+          <option value="300">보통 (0.3초)</option><option value="600">느림 (0.6초)</option>
+        </select></div>
+    </div>
+    <div class="hint">네이버 분봉은 최근 영업일 일부만 제공됩니다 — 실제 확보된 기간이 시작 후 상단 배지에 표시됩니다.</div>
   </div>
 
   <div class="card">
@@ -192,6 +205,40 @@ async function dedicatedQuote(codes){
   if(!out) throw new Error('empty');
   return {out, path:'전용'};
 }
+async function raceProxiesText(api, tmo){
+  const defs=[
+    {wrap:PROXY_DEFS[0].wrap, parse:r=>r.text()},
+    {wrap:PROXY_DEFS[1].wrap, parse:r=>r.text()},
+    {wrap:PROXY_DEFS[2].wrap, parse:r=>r.text()},
+    {wrap:PROXY_DEFS[3].wrap, parse:async r=>{const j=await r.json(); return j.contents||'';}}];
+  const one=async d=>{
+    const r=await Promise.race([fetch(d.wrap(api)), _tmo(tmo)]);
+    if(!r.ok) throw new Error('http');
+    const t=await d.parse(r);
+    if(!t||t.length<50) throw new Error('empty');
+    return t;
+  };
+  return Promise.any(defs.map(one));
+}
+function parseMinuteBars(text){
+  // fchart 형식: data="YYYYMMDDHHMM|시|고|저|종|량"
+  const out=[];
+  for(const m of text.matchAll(/data="(\d{12})\|([\d.]+)\|([\d.]+)\|([\d.]+)\|([\d.]+)\|/g))
+    out.push({t:m[1], o:+m[2], h:+m[3], l:+m[4], c:+m[5]});
+  out.sort((a,b)=>a.t<b.t?-1:1);
+  return out;
+}
+async function fetchHist(symbol, count){
+  if(myProxy){
+    try{
+      const sep=myProxy.includes('?')?'&':'?';
+      const r=await Promise.race([fetch(`${myProxy}${sep}hist=1&symbol=${symbol}&count=${count}&_ts=${Date.now()}_${++bustSeq}`), _tmo(6000)]);
+      if(r.ok){ const bars=parseMinuteBars(await r.text()); if(bars.length) return bars; }
+    }catch(e){}
+  }
+  const api=`https://fchart.stock.naver.com/sise.nhn?symbol=${symbol}&timeframe=minute&count=${count}&requestType=0&_ts=${Date.now()}_${++bustSeq}`;
+  try{ return parseMinuteBars(await raceProxiesText(api, 5000)); }catch(e){ return []; }
+}
 let goodBatch='A';
 async function _batch(kind, codes){
   const api = kind==='A'
@@ -269,8 +316,9 @@ if(document.getElementById('myproxy')) document.getElementById('myproxy').value=
 let mode=0;
 window.setMode=m=>{ mode=m;
   $('md0').classList.toggle('on',m===0); $('md1').classList.toggle('on',m===1);
-  $('mdhint').innerText = m===0
-    ? '실제 현재가에서 출발해 압축된 하루(09:00→15:10)를 시뮬레이션합니다. 장 마감 후에도 이용 가능.'
+  $('ropts').style.display = m===0?'grid':'none';
+  $('mdhint').innerHTML = m===0
+    ? '선택한 기간의 <b>실제 1분봉</b>(네이버)을 받아 압축 재생하며 매매규칙을 검증합니다. 장 마감 후에도 이용 가능.'
     : '전 종목을 2.5초 주기 배치(요청 1건)로 조회해 규칙 매매를 관전합니다 (포털·프록시 특성상 수 초 지연 가능). 평일 09:00~15:10 장중에만 의미 있고, 화면이 켜져 있어야 합니다.'; };
 
 // ═══════════ 엔진 ═══════════
@@ -284,6 +332,7 @@ const E={on:false, timer:null, rt:null, rrIdx:0};
 function newSession(anchors, liveCnt){
   E.mode=mode; E.min=9*60; E.over=false; E.halted=false; E.liq=false;
   E.pnl=0; E.count=0; E.trades=[]; E.liveCnt=liveCnt; E.rrIdx=0;
+  E.timeline=[]; E.ptr=0; E.curT=''; E.curDay=''; E.dayN=0; E.range=''; E.dayClosed=false;
   E.stk=STOCKS.map((s,i)=>({...s, p:anchors[i], open:anchors[i], hist:[anchors[i]], ev:null, live:false}));
   E.pf=profs.map(p=>({name:p.name, budget:p.budget*10000, tp:p.tp, sl:-Math.abs(p.sl),
     ta:p.ta, td:Math.abs(p.td), mx:p.mx, pnl:0, count:0, pos:{}, traded:new Set()}));
@@ -291,21 +340,22 @@ function newSession(anchors, liveCnt){
 }
 function clockStr(){
   if(E.mode===1) return new Date().toTimeString().slice(0,5);
-  const h=Math.floor(E.min/60), m=Math.floor(E.min%60);
-  return String(h).padStart(2,'0')+':'+String(m).padStart(2,'0');
+  if(!E.curT) return '-';
+  return `${E.curT.slice(4,6)}/${E.curT.slice(6,8)} ${E.curT.slice(8,10)}:${E.curT.slice(10,12)}`;
 }
+function curHM(){ return E.curT ? E.curT.slice(8) : '0000'; }
 function inEntryWindow(){
-  if(E.mode===0) return E.min<14.83*60;
+  if(E.mode===0) return curHM() < '1450';
   const t=new Date(); const mm=t.getHours()*60+t.getMinutes();
   return t.getDay()>=1&&t.getDay()<=5&&mm>=9*60&&mm<14*60+50;
 }
 function marketClosed(){
-  if(E.mode===0) return E.min>=15.166*60;
+  if(E.mode===0) return E.over;
   const t=new Date(); const mm=t.getHours()*60+t.getMinutes();
   return !(t.getDay()>=1&&t.getDay()<=5&&mm>=9*60&&mm<15*60+10);
 }
 function trade(pf,side,nm,qty,px,pnl,rs){
-  E.trades.unshift({t:clockStr(), pf:pf.name, side, nm, qty, px, pnl, rs});
+  E.trades.unshift({t:clockStr(), pf:pf.name, side, nm, qty, px:Math.round(px), pnl, rs});
   if(E.trades.length>20)E.trades.length=20;
 }
 function closePos(pf,s,pos,px,rs){
@@ -340,28 +390,66 @@ function evalRules(s){
   }
 }
 function pushHist(s){ s.hist.push(s.p); if(s.hist.length>60)s.hist.shift(); }
+function barRules(s, bar){
+  // 청산: 봉의 저가/고가 터치로 판정 (레벨가 체결 — 종가 판정보다 현실적)
+  for(const pf of E.pf){
+    const pos=pf.pos[s.code];
+    if(!pos)continue;
+    const sl=pos.entry*(1+pf.sl/100), tp=pos.entry*(1+pf.tp/100);
+    if(bar.l<=sl){ closePos(pf,s,pos,sl,'손절'); continue; }
+    if(bar.h>=tp){ closePos(pf,s,pos,tp,'익절'); continue; }
+    if(bar.h>pos.peak)pos.peak=bar.h;
+    const pk=(pos.peak/pos.entry-1)*100;
+    if(pk>=pf.ta){
+      const trailPx=pos.peak*(1-pf.td/100);
+      if(bar.l<=trailPx){ closePos(pf,s,pos,trailPx,'트레일링스탑'); continue; }
+    }
+  }
+  // 진입: 최근 10분 종가 +0.5% 급등 편승
+  if(E.halted||!inEntryWindow())return;
+  const L=s.hist.length, W=10, TH=0.005;
+  if(L<W+1)return;
+  if(s.p/s.hist[L-1-W]-1>=TH){
+    for(const pf of E.pf){
+      if(pf.traded.has(s.code)||pf.pos[s.code]||Object.keys(pf.pos).length>=pf.mx)continue;
+      const qty=Math.floor(pf.budget/s.p);
+      if(qty<1){ pf.traded.add(s.code); continue; }
+      pf.pos[s.code]={entry:s.p, peak:s.p, qty};
+      pf.traded.add(s.code); pf.count++; E.count++;
+      trade(pf,'BUY',s.n,qty,s.p,0,'급등편승');
+    }
+  }
+}
 function endDay(rs){
   for(const pf of E.pf) for(const s of E.stk) if(pf.pos[s.code]) closePos(pf,s,pf.pos[s.code],s.p,rs);
   E.over=true;
 }
-// 압축 모드 틱 (1틱 = 장중 45초)
+// 리플레이 틱: 실제 분봉 1개 = 1틱
+function liquidateAll(rs){
+  for(const pf of E.pf) for(const s of E.stk) if(pf.pos[s.code]) closePos(pf,s,pf.pos[s.code],s.p,rs);
+}
 function tickSim(){
   if(E.over)return;
-  E.min+=0.75;
-  for(const s of E.stk){
-    let d=R.g(0,0.0006);
-    if(!s.ev && Math.random()<0.004 && inEntryWindow())
-      s.ev={left:12+Math.floor(Math.random()*10), drift:0.002+Math.random()*0.0015, dump:Math.random()<0.35, ph:'up'};
-    if(s.ev){
-      if(s.ev.ph==='up'){ d+=s.ev.drift; if(--s.ev.left<=0)
-        s.ev=s.ev.dump?{left:16,drift:-0.0028,dump:false,ph:'dn'}:null; }
-      else{ d+=s.ev.drift; if(--s.ev.left<=0)s.ev=null; }
-    }
-    s.p=Math.max(100, s.p*(1+d));
-    pushHist(s); evalRules(s);
+  if(E.ptr>=E.timeline.length){ liquidateAll('기간종료 청산'); E.over=true; return; }
+  const t=E.timeline[E.ptr++];
+  const day=t.slice(0,8);
+  if(day!==E.curDay){                       // 새 거래일: 재진입금지 리셋
+    E.curDay=day; E.dayN++; E.dayClosed=false;
+    for(const pf of E.pf) pf.traded.clear();
   }
-  if(E.liq){E.liq=false; for(const pf of E.pf) for(const s of E.stk) if(pf.pos[s.code]) closePos(pf,s,pf.pos[s.code],s.p,'원격 전량청산');}
-  if(E.min>=15.166*60) endDay('장마감 전량청산');
+  E.curT=t;
+  for(const s of E.stk){
+    const bar=s.map && s.map.get(t);
+    if(!bar)continue;
+    s.p=bar.c; s.upd=Date.now();
+    pushHist(s);
+    if(!E.dayClosed) barRules(s, bar);
+  }
+  if(E.liq){ E.liq=false; liquidateAll('원격 전량청산'); }
+  if(!E.dayClosed && t.slice(8)>='1510'){   // 15:10 당일 전량청산
+    liquidateAll('장마감 전량청산');
+    E.dayClosed=true;
+  }
 }
 // 실시간 모드 틱: 전 종목 병렬 조회 (3.5초 주기 · 이전 사이클 완료 전 재진입 방지)
 let polling=false;
@@ -403,6 +491,45 @@ window.start=async()=>{
     if(!(p.tp>=0.3&&p.sl>=0.3)) return alert(p.name+': 익절/손절 0.3% 이상');
   }
   store.set('trial_profs', JSON.stringify(profs));
+
+  if(mode===0){
+    // ── 실데이터 리플레이: 대상기간 분봉 수집 → 타임라인 구성
+    const days=+($('rdays').value||3);
+    const count=Math.min(days*420+60, 4500);
+    const hists=[];
+    for(let i=0;i<STOCKS.length;i++){
+      $('setupmsg').innerText=`과거 분봉 수집 중… (${i+1}/${STOCKS.length}) ${STOCKS[i].n}`;
+      hists[i]=await fetchHist(STOCKS[i].code, count);
+    }
+    const okIdx=hists.map((h,i)=>h.length>50?i:-1).filter(i=>i>=0);
+    if(okIdx.length<3){
+      $('setupmsg').innerText='과거 분봉 확보 실패 (프록시 문제) — 전용 프록시 등록 후 재시도하거나 잠시 후 다시 시도하세요';
+      return;
+    }
+    // 기간 필터: 최근 N영업일만
+    const allDays=[...new Set(okIdx.flatMap(i=>hists[i].map(b=>b.t.slice(0,8))))].sort();
+    const useDays=new Set(allDays.slice(-days));
+    newSession(STOCKS.map(s=>s.base), 0);
+    E.stk=okIdx.map(i=>{
+      const bars=hists[i].filter(b=>useDays.has(b.t.slice(0,8)));
+      const map=new Map(bars.map(b=>[b.t,b]));
+      const first=bars[0];
+      return {...STOCKS[i], p:first.c, open:first.c, hist:[first.c], live:true, map};
+    });
+    E.timeline=[...new Set(E.stk.flatMap(s=>[...s.map.keys()]))].sort();
+    const d0=E.timeline[0], d1=E.timeline[E.timeline.length-1];
+    E.range=`${d0.slice(4,6)}/${d0.slice(6,8)}~${d1.slice(4,6)}/${d1.slice(6,8)}`;
+    $('setupmsg').innerText='';
+    $('setup').classList.add('hide'); $('dash').classList.remove('hide');
+    if(E.timer)clearInterval(E.timer);
+    if(E.rt)clearInterval(E.rt);
+    E.timer=setInterval(tickSim, +($('rspd').value||150));
+    E.rt=setInterval(render,500);
+    render();
+    return;
+  }
+
+  // ── 실시간 관전
   $('setupmsg').innerText='실시세 조회 중… (몇 초 걸릴 수 있습니다)';
   const fa=await fetchAll(STOCKS.map(s=>s.code));
   const rs=fa.list;
@@ -415,7 +542,7 @@ window.start=async()=>{
   $('setup').classList.add('hide'); $('dash').classList.remove('hide');
   if(E.timer)clearInterval(E.timer);
   if(E.rt)clearInterval(E.rt);
-  E.timer=setInterval(E.mode===0?tickSim:tickLive, E.mode===0?250:2500);
+  E.timer=setInterval(tickLive, 2500);
   E.rt=setInterval(render,1000);
   render();
 };
@@ -432,18 +559,21 @@ window.cmd=c=>{
 function render(){
   if(!E.on)return;
   const liveNow=E.stk.filter(s=>s.live).length;
-  const src = liveNow>0 ? `📡 실시세 ${liveNow}/${STOCKS.length}종목` : `📷 스냅샷 시세 (${SNAP_DATE})`;
-  const st = E.over?'<span class="badge b-off">장외시간 · ▶재개 = 새로운 장</span>'
+  const srcBadge = E.mode===0
+    ? `📼 실데이터 ${E.range} (${E.dayN}일차/${E.stk.length}종목)`
+    : (liveNow>0 ? `📡 실시세 ${liveNow}/${STOCKS.length}종목` : `📷 스냅샷 시세 (${SNAP_DATE})`);
+  const prog = E.mode===0&&E.timeline.length ? ` · ${Math.round(E.ptr/E.timeline.length*100)}%` : '';
+  const st = E.over?'<span class="badge b-off">리플레이 종료 · ▶재개 = 처음부터</span>'
     : E.halted?'<span class="badge b-halt">진입중지</span>':'<span class="badge b-run">가동중</span>';
   $('status').innerHTML = st
-    + `<span class="badge b-info">${E.mode===0?'⏩ 압축':'📡 실시간'}</span>`
-    + `<span class="badge b-info">${src}</span>`
-    + `<span class="badge b-info">🕒 ${clockStr()}</span>`;
+    + `<span class="badge b-info">${E.mode===0?'📼 리플레이':'📡 실시간'}</span>`
+    + `<span class="badge b-info">${srcBadge}</span>`
+    + `<span class="badge b-info">🕒 ${clockStr()}${prog}</span>`;
   $('kpnl').innerHTML=`<span class="${cls(E.pnl)}">${E.pnl>0?'+':''}${fmt(E.pnl)}원</span>`;
   $('kcnt').innerText=E.count+'회';
   const nowMs=Date.now();
-  let h=`<div class="card"><div class="ct">감시 종목${E.mode===1?' · 2.5초 배치 폴링':''}</div><div class="tw"><table>
-    <thead><tr><th>종목</th><th>현재가</th><th>시작가대비</th><th>갱신</th></tr></thead><tbody>`;
+  let h=`<div class="card"><div class="ct">감시 종목${E.mode===1?' · 2.5초 배치 폴링':' · 실제 분봉 재생'}</div><div class="tw"><table>
+    <thead><tr><th>종목</th><th>현재가</th><th>${E.mode===0?'기간시작 대비':'시작가대비'}</th><th>갱신</th></tr></thead><tbody>`;
   for(const s of E.stk){
     const r=(s.p/s.open-1)*100;
     const hot=s.chg && nowMs-s.chg<3000;
