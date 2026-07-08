@@ -5,7 +5,7 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="단타봇">
-<title>단타봇 조종석 · 체험판 v3.1</title>
+<title>단타봇 조종석 · 체험판 v3.2</title>
 <style>
 :root{--bg:#0d1420;--card:#18202f;--card2:#141b29;--line:#273349;--tx:#e9eef8;--sub:#8fa3c8;--dim:#5f7396;
       --pos:#ff5b5b;--neg:#4d8dff;--acc:#ffb020;--ok:#3ecf8e}
@@ -62,7 +62,7 @@ input[type=number],input[type=text]{background:#101828;border:1px solid var(--li
 .srow .r2 input{padding:8px 5px;font-size:.84rem}
 </style></head>
 <body>
-<h1>🤖 단타봇 조종석 <small>체험판 v3.1</small></h1>
+<h1>🤖 단타봇 조종석 <small>체험판 v3.2</small></h1>
 <div class="sub"><b style="color:#ffb020">폰 단독 실행 · 실제 시세 기반</b> — 시작 시 네이버 실시세를 받아오고(안되면 오늘자 스냅샷), 그 위에서 실제 매매규칙이 작동합니다. 가상 자금·주문이며 실제 거래가 아닙니다.</div>
 
 <!-- ═══ 설정 ═══ -->
@@ -112,6 +112,10 @@ input[type=number],input[type=text]{background:#101828;border:1px solid var(--li
     <summary style="cursor:pointer;color:#8fa3c8;font-weight:600;font-size:.85rem">⚙ 내 전용 프록시 (실시간 끊김 해결 · 권장)</summary>
     <label>Apps Script 웹앱 URL</label>
     <input type="text" id="myproxy" placeholder="https://script.google.com/macros/s/.../exec" oninput="saveProxy(this.value)">
+    <div style="display:flex;gap:8px;align-items:center;margin-top:8px">
+      <button type="button" class="btn-sub" onclick="testProxy()">🔌 연결 테스트</button>
+      <span id="ptest" class="hint" style="margin-top:0"></span>
+    </div>
     <div class="hint">공용 무료 프록시는 전 세계가 같이 써서 자주 막힙니다. 구글 Apps Script로 5분 만에 만드는
     <b>내 전용 프록시</b>를 등록하면 사이클당 요청 1건을 내 할당량(하루 2만건)으로 처리해 끊김이 사라집니다.
     비워두면 기존 공용 프록시 사용. 만드는 방법은 대화 안내 참조.</div>
@@ -174,34 +178,70 @@ const STOCKS=[
   {code:'009150', n:'삼성전기',       base:2031000}];
 
 // ═══════════ 실시세 조회: 배치 API(8종목 1요청) + 프록시 동시 경주 ═══════════
+const _bkt=u=>u.replace(/_ts=[^&]+/, '_ts=b'+Math.floor(Date.now()/30000));  // 30초 버킷(캐시 활용)
 const PROXY_DEFS=[
   {wrap:u=>'https://corsproxy.io/?url='+encodeURIComponent(u),
    parse:r=>r.json()},
-  {wrap:u=>'https://api.allorigins.win/raw?url='+encodeURIComponent(u),
+  {wrap:u=>'https://api.allorigins.win/raw?url='+encodeURIComponent(_bkt(u)),
    parse:r=>r.json()},
   {wrap:u=>'https://api.codetabs.com/v1/proxy?quest='+encodeURIComponent(u),
    parse:r=>r.json()},
-  {wrap:u=>'https://api.allorigins.win/get?url='+encodeURIComponent(u),
+  {wrap:u=>'https://api.allorigins.win/get?url='+encodeURIComponent(_bkt(u)),
    parse:async r=>{const j=await r.json(); return JSON.parse(j.contents);}}];
 let bustSeq=0, goodProxy=-1;
+const proxyCool=[0,0,0,0];   // 실패 프록시 20초 제외
 let myProxy=(store.get('trial_proxy')||'').trim();
 window.saveProxy=v=>{ myProxy=(v||'').trim(); store.set('trial_proxy', myProxy); };
+let dediState = myProxy ? '?' : '없음';   // ok | fail | ? | 없음
+window.testProxy=async()=>{
+  const el=document.getElementById('ptest');
+  if(!myProxy){ el.innerHTML='<span style="color:#ff8f8f">URL을 먼저 입력하세요</span>'; return; }
+  el.innerText='테스트 중…';
+  try{
+    const sep=myProxy.includes('?')?'&':'?';
+    const r=await Promise.race([fetch(`${myProxy}${sep}codes=005930&_ts=${Date.now()}`), _tmo(8000)]);
+    const text=await r.text();
+    let j; try{ j=JSON.parse(text); }catch(e){ j=null; }
+    const out=j && parseDatas(j);
+    if(out && out['005930']){
+      dediState='ok';
+      el.innerHTML=`<span style="color:#3ecf8e">✅ 정상 — 삼성전자 ${out['005930'].toLocaleString('ko-KR')}원 수신</span>`;
+    }else if(text.includes('<!DOCTYPE') || text.includes('accounts.google')){
+      dediState='fail';
+      el.innerHTML='<span style="color:#ff8f8f">❌ 로그인 페이지가 응답됨 — 배포 설정의 액세스 권한을 "모든 사용자"로 바꾸고 새 버전 배포하세요</span>';
+    }else{
+      dediState='fail';
+      el.innerHTML='<span style="color:#ff8f8f">❌ 응답이 시세 형식이 아님 — 코드 붙여넣기/새 버전 배포 여부 확인 (HTTP '+r.status+')</span>';
+    }
+  }catch(e){
+    dediState='fail';
+    el.innerHTML='<span style="color:#ff8f8f">❌ 연결 실패(타임아웃) — URL이 /exec로 끝나는지 확인</span>';
+  }
+};
 function _tmo(ms){ return new Promise((_,rj)=>setTimeout(()=>rj(new Error('timeout')),ms)); }
 async function _via(i, api, tmo){
   const p=PROXY_DEFS[i];
-  const r=await Promise.race([fetch(p.wrap(api)), _tmo(tmo)]);
-  if(!r.ok) throw new Error('http '+r.status);
-  const j=await p.parse(r);
-  goodProxy=i;                       // 성공 프록시 기억 → 평시 사이클당 요청 1건
-  return j;
+  try{
+    const r=await Promise.race([fetch(p.wrap(api)), _tmo(tmo)]);
+    if(!r.ok) throw new Error('http '+r.status);
+    const j=await p.parse(r);
+    goodProxy=i; proxyCool[i]=0;     // 성공 프록시 기억 → 평시 사이클당 요청 1건
+    return j;
+  }catch(e){
+    proxyCool[i]=Date.now()+20000;   // 실패 프록시 20초 제외 (부하 분산)
+    throw e;
+  }
 }
 async function raceProxies(api, tmo){
   if(goodProxy>=0){
     try{ return await _via(goodProxy, api, tmo); }
     catch(e){ goodProxy=-1; }        // 죽으면 전체 경주로 복귀
   }
+  const now=Date.now();
+  let idx=PROXY_DEFS.map((_,i)=>i).filter(i=>proxyCool[i]<now);
+  if(!idx.length) idx=PROXY_DEFS.map((_,i)=>i);   // 전부 쿨다운이면 전체 재시도
   try{
-    return await Promise.any(PROXY_DEFS.map((_,i)=>_via(i, api, tmo)));
+    return await Promise.any(idx.map(i=>_via(i, api, tmo)));
   }catch(e){
     const err=new Error('proxyDown'); err.proxyDown=true; throw err;  // 프록시 전멸 신호
   }
@@ -326,7 +366,8 @@ async function batchQuoteUS(){
 async function batchQuote(codes){
   if(mkt==='US') return batchQuoteUS();
   if(myProxy){
-    try{ return await dedicatedQuote(codes); }catch(e){}   // 전용 실패 시 공용으로
+    try{ const v=await dedicatedQuote(codes); dediState='ok'; return v; }
+    catch(e){ dediState='fail'; }                          // 전용 실패 시 공용으로
   }
   const first=goodBatch, second=first==='A'?'B':'A';
   for(const k of [first, second]){
@@ -682,7 +723,9 @@ function render(){
   if(E.mode===1){
     const d0=E.diag||{};
     const warn=(d0.fails||0)>=3;
-    h+=`<div class="hint" style="margin-top:6px;${warn?'color:#ff8f8f':''}">폴링: ${d0.t||'-'} · 경로 ${d0.path||'-'} · 성공 ${d0.ok??0}/${E.stk.length}종목${E.skip>0?` · 프록시 휴지 ${Math.round(E.skip*2.5)}초`:''}${warn?` · 연속실패 ${d0.fails}회 — 프록시가 잠시 막혔습니다. 자동으로 간격을 늘려 재시도 중`:''}</div>`;
+    const dediMsg = !myProxy ? ' · <b style="color:#ffb020">전용 프록시 미등록 — 등록하면 해결됩니다 (설정 화면)</b>'
+      : (dediState==='fail' ? ' · <b style="color:#ff8f8f">전용 프록시 응답오류 — 설정에서 [연결 테스트] 실행</b>' : '');
+    h+=`<div class="hint" style="margin-top:6px;${warn?'color:#ff8f8f':''}">폴링: ${d0.t||'-'} · 경로 ${d0.path||'-'} · 성공 ${d0.ok??0}/${E.stk.length}종목${E.skip>0?` · 프록시 휴지 ${Math.round(E.skip*2.5)}초`:''}${warn?` · 연속실패 ${d0.fails}회`:''}${dediMsg}</div>`;
     if(marketClosed()) h+=`<div class="hint" style="color:#ffb020">지금은 장외시간 — 가격이 멈춰 있는 게 정상입니다 (평일 09:00~15:10 장중에 시도)</div>`;
   }
   h+=`</div>`;
