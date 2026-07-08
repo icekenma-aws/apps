@@ -5,7 +5,7 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="단타봇">
-<title>단타봇 조종석 · 체험판 v4.1</title>
+<title>단타봇 조종석 · 체험판 v4.2</title>
 <style>
 :root{--bg:#0d1420;--card:#18202f;--card2:#141b29;--line:#273349;--tx:#e9eef8;--sub:#8fa3c8;--dim:#5f7396;
       --pos:#ff5b5b;--neg:#4d8dff;--acc:#ffb020;--ok:#3ecf8e}
@@ -62,7 +62,7 @@ input[type=number],input[type=text]{background:#101828;border:1px solid var(--li
 .srow .r2 input{padding:8px 5px;font-size:.84rem}
 </style></head>
 <body>
-<h1>🤖 단타봇 조종석 <small>체험판 v4.1</small></h1>
+<h1>🤖 단타봇 조종석 <small>체험판 v4.2</small></h1>
 <div class="sub"><b style="color:#ffb020">폰 단독 실행 · 실제 시세 기반</b> — 시작 시 네이버 실시세를 받아오고(안되면 오늘자 스냅샷), 그 위에서 실제 매매규칙이 작동합니다. 가상 자금·주문이며 실제 거래가 아닙니다.</div>
 
 <!-- ═══ 설정 ═══ -->
@@ -233,13 +233,21 @@ window.testProxy=async()=>{
       dediState='ok'; dediFails=0;
       let histMsg='';
       try{
-        const r2=await Promise.race([fetch(`${myProxy}${sep}hist=1&symbol=005930&count=80&_ts=${Date.now()}`), _tmo(9000)]);
-        const t2=await r2.text();
-        const bars=parseMinuteBars(t2);
-        histMsg = bars.length
-          ? `<br>✅ 분봉 ${bars.length}개 수신 (${bars[0].t.slice(4,8)}~) — 리플레이/실험실 사용 가능`
-          : `<br><span style="color:#ff8f8f">❌ 분봉 없음 (응답 ${t2.length}자) — GAS를 최신 코드로 교체 후 "새 버전 배포" 필요</span>`;
-      }catch(e){ histMsg='<br><span style="color:#ff8f8f">❌ 분봉 요청 무응답 — GAS 최신 코드로 재배포</span>'; }
+        let dediBars=[];
+        try{
+          const r2=await Promise.race([fetch(`${myProxy}${sep}hist=1&symbol=005930.KS&days=1&_ts=${Date.now()}`), _tmo(9000)]);
+          const t2=await r2.text();
+          try{ dediBars=parseYahooBars(JSON.parse(t2), 1); }catch(e){}
+        }catch(e){}
+        if(dediBars.length){
+          histMsg=`<br>✅ 분봉 ${dediBars.length}개 수신 (전용·야후 국내분봉) — 리플레이/실험실 사용 가능`;
+        }else{
+          const pub=await fetchYahoo('005930.KS', 1, 1);
+          histMsg = pub.length
+            ? `<br><span style="color:#ffb020">⚠ 분봉: 공용으론 ${pub.length}개 수신되나 전용은 실패 — GAS를 v6 코드로 교체 후 "새 버전 배포"하면 전용으로 탑니다</span>`
+            : `<br><span style="color:#ff8f8f">❌ 분봉 실패 (전용·공용 모두) — 잠시 후 재시도</span>`;
+        }
+      }catch(e){ histMsg='<br><span style="color:#ff8f8f">❌ 분봉 검사 오류</span>'; }
       el.innerHTML=`<span style="color:#3ecf8e">✅ 실시간 정상 — 삼성전자 ${out['005930'].toLocaleString('ko-KR')}원</span>`+histMsg;
     }else if(text.includes('<!DOCTYPE') || text.includes('accounts.google')){
       dediState='fail';
@@ -330,8 +338,8 @@ function parseMinuteBars(text){
   return out;
 }
 let histDiag='';   // 분봉 수집 진단 (마지막 시도 내역)
-function parseYahooBars(j){
-  // yahoo v8 chart → 분봉 (거래소 현지시각 기준 YYYYMMDDHHMM)
+function parseYahooBars(j, fx){
+  // yahoo v8 chart → 분봉 (거래소 현지시각 기준 YYYYMMDDHHMM) · fx: 원화 환산배수
   try{
     const r=j.chart.result[0];
     const off=(r.meta.gmtoffset||0)*1000;
@@ -341,27 +349,45 @@ function parseYahooBars(j){
       if(q.close[i]==null)continue;
       const d=new Date(ts[i]*1000+off);
       const t=`${d.getUTCFullYear()}${String(d.getUTCMonth()+1).padStart(2,'0')}${String(d.getUTCDate()).padStart(2,'0')}${String(d.getUTCHours()).padStart(2,'0')}${String(d.getUTCMinutes()).padStart(2,'0')}`;
-      out.push({t, o:(q.open[i]??q.close[i])*FX, h:(q.high[i]??q.close[i])*FX,
-                l:(q.low[i]??q.close[i])*FX, c:q.close[i]*FX});
+      out.push({t, o:(q.open[i]??q.close[i])*fx, h:(q.high[i]??q.close[i])*fx,
+                l:(q.low[i]??q.close[i])*fx, c:q.close[i]*fx});
     }
     out.sort((a,b)=>a.t<b.t?-1:1);
     return out;
   }catch(e){ return []; }
 }
-async function fetchHistUS(sym, days){
-  const rng=Math.min(days+1,7)+'d';
-  const api=`https://query1.finance.yahoo.com/v8/finance/chart/${sym}?interval=1m&range=${rng}&_ts=${Date.now()}_${++bustSeq}`;
+async function fetchYahoo(sym, days, fx){
+  // 전용(GAS v6: hist=1&symbol=...&days=) → 공용 프록시 순
+  const d=Math.min(days+1,7);
   if(myProxy){
     try{
       const sep=myProxy.includes('?')?'&':'?';
-      const r=await Promise.race([fetch(`${myProxy}${sep}hist=1&mkt=us&symbol=${sym}&days=${Math.min(days+1,7)}&_ts=${Date.now()}_${++bustSeq}`), _tmo(7000)]);
-      if(r.ok){ const bars=parseYahooBars(await r.json()); if(bars.length) return bars; }
-    }catch(e){}
+      const r=await Promise.race([fetch(`${myProxy}${sep}hist=1&symbol=${sym}&days=${d}&_ts=${Date.now()}_${++bustSeq}`), _tmo(7000)]);
+      if(r.ok){
+        const text=await r.text();
+        let j; try{ j=JSON.parse(text); }catch(e){ j=null; }
+        const bars=j?parseYahooBars(j, fx):[];
+        if(bars.length) return bars;
+        histDiag=`전용: 야후분봉 아님(응답 ${text.length}자 — GAS v6 재배포 필요)`;
+      }else histDiag=`전용: HTTP ${r.status}`;
+    }catch(e){ histDiag='전용: 무응답'; }
   }
-  try{ return parseYahooBars(await raceProxies(api, 6000)); }catch(e){ return []; }
+  const api=`https://query1.finance.yahoo.com/v8/finance/chart/${sym}?interval=1m&range=${d}d&_ts=${Date.now()}_${++bustSeq}`;
+  try{
+    const bars=parseYahooBars(await raceProxies(api, 6000), fx);
+    if(bars.length) return bars;
+    histDiag+=' · 공용: 야후 응답에 분봉 없음';
+  }catch(e){ histDiag+=' · 공용: 프록시 실패'; }
+  return [];
 }
-async function fetchHist(symbol, count){
+async function fetchHistUS(sym, days){ histDiag=''; return fetchYahoo(sym, days, FX); }
+async function fetchHist(symbol, count, days){
   histDiag='';
+  // 1순위: 야후 국내(.KS) 1분봉 — 네이버 구형 분봉 경로 폐쇄 대응
+  const yb=await fetchYahoo(symbol+'.KS', days||3, 1);
+  if(yb.length) return yb;
+  const yDiag=histDiag;
+  // 2순위: 네이버 레거시 (혹시 살아있는 환경 대비)
   if(myProxy){
     try{
       const sep=myProxy.includes('?')?'&':'?';
@@ -381,9 +407,9 @@ async function fetchHist(symbol, count){
     try{
       const bars=parseMinuteBars(await raceProxiesText(api, 5000));
       if(bars.length) return bars;
-      histDiag+=' · 공용: 응답에 분봉 없음';
-    }catch(e){ histDiag+=' · 공용: 프록시 실패'; }
+    }catch(e){}
   }
+  histDiag=yDiag;   // 진단은 주경로(야후) 기준으로 보고
   return [];
 }
 let goodBatch='A';
@@ -692,7 +718,7 @@ window.start=async()=>{
     const hists=[];
     for(let i=0;i<P.length;i++){
       $('setupmsg').innerText=`과거 분봉 수집 중… (${i+1}/${P.length}) ${P[i].n}`;
-      hists[i]=mkt==='US' ? await fetchHistUS(P[i].y, days) : await fetchHist(P[i].code, count);
+      hists[i]=mkt==='US' ? await fetchHistUS(P[i].y, days) : await fetchHist(P[i].code, count, days);
     }
     const okIdx=hists.map((h,i)=>h.length>50?i:-1).filter(i=>i>=0);
     if(okIdx.length<3){
