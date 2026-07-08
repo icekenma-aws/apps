@@ -5,7 +5,7 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="단타봇">
-<title>단타봇 조종석 · 체험판 v3.2</title>
+<title>단타봇 조종석 · 체험판 v3.3</title>
 <style>
 :root{--bg:#0d1420;--card:#18202f;--card2:#141b29;--line:#273349;--tx:#e9eef8;--sub:#8fa3c8;--dim:#5f7396;
       --pos:#ff5b5b;--neg:#4d8dff;--acc:#ffb020;--ok:#3ecf8e}
@@ -62,7 +62,7 @@ input[type=number],input[type=text]{background:#101828;border:1px solid var(--li
 .srow .r2 input{padding:8px 5px;font-size:.84rem}
 </style></head>
 <body>
-<h1>🤖 단타봇 조종석 <small>체험판 v3.2</small></h1>
+<h1>🤖 단타봇 조종석 <small>체험판 v3.3</small></h1>
 <div class="sub"><b style="color:#ffb020">폰 단독 실행 · 실제 시세 기반</b> — 시작 시 네이버 실시세를 받아오고(안되면 오늘자 스냅샷), 그 위에서 실제 매매규칙이 작동합니다. 가상 자금·주문이며 실제 거래가 아닙니다.</div>
 
 <!-- ═══ 설정 ═══ -->
@@ -193,6 +193,7 @@ const proxyCool=[0,0,0,0];   // 실패 프록시 20초 제외
 let myProxy=(store.get('trial_proxy')||'').trim();
 window.saveProxy=v=>{ myProxy=(v||'').trim(); store.set('trial_proxy', myProxy); };
 let dediState = myProxy ? '?' : '없음';   // ok | fail | ? | 없음
+let dediFails = 0;                        // 전용 연속 실패 (일시 지연은 경고 안 함)
 window.testProxy=async()=>{
   const el=document.getElementById('ptest');
   if(!myProxy){ el.innerHTML='<span style="color:#ff8f8f">URL을 먼저 입력하세요</span>'; return; }
@@ -204,7 +205,7 @@ window.testProxy=async()=>{
     let j; try{ j=JSON.parse(text); }catch(e){ j=null; }
     const out=j && parseDatas(j);
     if(out && out['005930']){
-      dediState='ok';
+      dediState='ok'; dediFails=0;
       el.innerHTML=`<span style="color:#3ecf8e">✅ 정상 — 삼성전자 ${out['005930'].toLocaleString('ko-KR')}원 수신</span>`;
     }else if(text.includes('<!DOCTYPE') || text.includes('accounts.google')){
       dediState='fail';
@@ -260,7 +261,7 @@ async function dedicatedQuote(codes){
   // 내 전용 프록시(Apps Script): ?codes=... 로 네이버 응답 원본을 그대로 중계
   const sep=myProxy.includes('?')?'&':'?';
   const url=`${myProxy}${sep}codes=${codes.join(',')}&_ts=${Date.now()}_${++bustSeq}`;
-  const r=await Promise.race([fetch(url), _tmo(3500)]);
+  const r=await Promise.race([fetch(url), _tmo(5000)]);
   if(!r.ok) throw new Error('http '+r.status);
   const out=parseDatas(await r.json());
   if(!out) throw new Error('empty');
@@ -355,9 +356,11 @@ async function batchQuoteUS(){
   if(myProxy){
     try{
       const sep=myProxy.includes('?')?'&':'?';
-      const r=await Promise.race([fetch(`${myProxy}${sep}mkt=us&codes=${syms}&_ts=${Date.now()}_${++bustSeq}`), _tmo(3500)]);
-      if(r.ok){ const v=await mk(await r.json()); if(v) return {...v, path:'전용(해외)'}; }
-    }catch(e){}
+      const r=await Promise.race([fetch(`${myProxy}${sep}mkt=us&codes=${syms}&_ts=${Date.now()}_${++bustSeq}`), _tmo(5000)]);
+      if(r.ok){ const v=await mk(await r.json());
+        if(v){ dediState='ok'; dediFails=0; return {...v, path:'전용(해외)'}; } }
+      dediFails++; if(dediFails>=3) dediState='fail';
+    }catch(e){ dediFails++; if(dediFails>=3) dediState='fail'; }
   }
   const api=`https://polling.finance.naver.com/api/realtime/worldstock/stock/${syms}?_ts=${Date.now()}_${++bustSeq}`;
   try{ const v=await mk(await raceProxies(api, 2500)); if(v) return v; }catch(e){ if(e&&e.proxyDown) return {down:true}; }
@@ -366,8 +369,8 @@ async function batchQuoteUS(){
 async function batchQuote(codes){
   if(mkt==='US') return batchQuoteUS();
   if(myProxy){
-    try{ const v=await dedicatedQuote(codes); dediState='ok'; return v; }
-    catch(e){ dediState='fail'; }                          // 전용 실패 시 공용으로
+    try{ const v=await dedicatedQuote(codes); dediState='ok'; dediFails=0; return v; }
+    catch(e){ dediFails++; if(dediFails>=3) dediState='fail'; }   // 일시 지연은 조용히 공용 폴백
   }
   const first=goodBatch, second=first==='A'?'B':'A';
   for(const k of [first, second]){
@@ -724,7 +727,8 @@ function render(){
     const d0=E.diag||{};
     const warn=(d0.fails||0)>=3;
     const dediMsg = !myProxy ? ' · <b style="color:#ffb020">전용 프록시 미등록 — 등록하면 해결됩니다 (설정 화면)</b>'
-      : (dediState==='fail' ? ' · <b style="color:#ff8f8f">전용 프록시 응답오류 — 설정에서 [연결 테스트] 실행</b>' : '');
+      : (dediState==='fail' && dediFails>=3
+         ? ` · <b style="color:#ff8f8f">전용 프록시 연속 ${dediFails}회 무응답 — [연결 테스트]로 확인</b>` : '');
     h+=`<div class="hint" style="margin-top:6px;${warn?'color:#ff8f8f':''}">폴링: ${d0.t||'-'} · 경로 ${d0.path||'-'} · 성공 ${d0.ok??0}/${E.stk.length}종목${E.skip>0?` · 프록시 휴지 ${Math.round(E.skip*2.5)}초`:''}${warn?` · 연속실패 ${d0.fails}회`:''}${dediMsg}</div>`;
     if(marketClosed()) h+=`<div class="hint" style="color:#ffb020">지금은 장외시간 — 가격이 멈춰 있는 게 정상입니다 (평일 09:00~15:10 장중에 시도)</div>`;
   }
