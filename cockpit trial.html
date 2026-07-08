@@ -5,7 +5,7 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="단타봇">
-<title>단타봇 조종석 · 체험판 v3.3</title>
+<title>단타봇 조종석 · 체험판 v4.0</title>
 <style>
 :root{--bg:#0d1420;--card:#18202f;--card2:#141b29;--line:#273349;--tx:#e9eef8;--sub:#8fa3c8;--dim:#5f7396;
       --pos:#ff5b5b;--neg:#4d8dff;--acc:#ffb020;--ok:#3ecf8e}
@@ -62,7 +62,7 @@ input[type=number],input[type=text]{background:#101828;border:1px solid var(--li
 .srow .r2 input{padding:8px 5px;font-size:.84rem}
 </style></head>
 <body>
-<h1>🤖 단타봇 조종석 <small>체험판 v3.3</small></h1>
+<h1>🤖 단타봇 조종석 <small>체험판 v4.0</small></h1>
 <div class="sub"><b style="color:#ffb020">폰 단독 실행 · 실제 시세 기반</b> — 시작 시 네이버 실시세를 받아오고(안되면 오늘자 스냅샷), 그 위에서 실제 매매규칙이 작동합니다. 가상 자금·주문이며 실제 거래가 아닙니다.</div>
 
 <!-- ═══ 설정 ═══ -->
@@ -122,7 +122,32 @@ input[type=number],input[type=text]{background:#101828;border:1px solid var(--li
   </details>
 
   <button class="btn-go" onclick="start()">▶ 시작</button>
+  <button class="btn-sub" style="width:100%;margin-top:8px" onclick="openLab()">🧪 실험실 — 설정 진화 발굴 (일자별 백테스트 누적)</button>
   <div class="hint" id="setupmsg" style="margin-top:8px"></div>
+</div>
+
+<!-- ═══ 실험실 ═══ -->
+<div id="lab" class="hide">
+  <div class="card">
+    <div class="ct">🧪 실험실 — 케이스별 일자 백테스트 · 누적 승률 관리 · 진화 탐색</div>
+    <div class="hint">모든 케이스가 <b>같은 실제 분봉</b>(선택 기간·시장)에서 일자별로 매매를 수행합니다.
+    결과는 날짜 단위로 폰에 누적 저장 — 매일 실행할수록 표본이 쌓여 승률의 신뢰도가 올라갑니다.
+    공통조건: 종목당 100만원 · 최대 2종목 · 진입신호 동일(10분 +0.5%).</div>
+    <div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap">
+      <button class="btn-sub" onclick="runLab()">▶ 전체 실행 (기간·시장은 위 설정 사용)</button>
+      <button class="btn-sub" onclick="evolveLab()">🧬 진화 — 상위 3개 유지 + 변이 6개 생성</button>
+      <button class="btn-sub" onclick="resetLab()">🗑 누적 초기화</button>
+    </div>
+    <div class="hint" id="labmsg" style="margin-top:8px"></div>
+  </div>
+  <div class="card">
+    <div class="ct">케이스 성적 (누적손익순 · 👑 1위)</div>
+    <div class="tw"><table>
+      <thead><tr><th>케이스 (익/손/발동/폭)</th><th>세대</th><th>일수</th><th>매매</th><th>승률</th><th>누적손익</th><th>일평균</th><th>최악일</th><th></th></tr></thead>
+      <tbody id="labtbl"></tbody>
+    </table></div>
+  </div>
+  <button class="btn-sub" style="width:100%" onclick="closeLab()">← 설정으로</button>
 </div>
 
 <!-- ═══ 대시보드 ═══ -->
@@ -764,5 +789,167 @@ function render(){
   } else h+=`<div style="color:#5f7396;font-size:.8rem">아직 매매 없음${E.mode===1?' — 실시간 모드는 실제 급등(약 1분 +0.5%)이 나와야 진입합니다':''}</div>`;
   h+=`<div class="upd">갱신 ${new Date().toTimeString().slice(0,8)}</div></div>`;
   $('root').innerHTML=h;
+}
+
+// ═══════════ 🧪 실험실: 일자별 백테스트 · 누적 · 진화 ═══════════
+const LAB_BUDGET=1000000, LAB_MX=2, LAB_CAP=24;
+function caseKey(p){ return `${p.tp}/${p.sl}/${p.ta}/${p.td}`; }
+function labStoreKey(){ return 'lab_'+mkt; }
+function loadLab(){
+  try{ return JSON.parse(store.get(labStoreKey())||'{}'); }catch(e){ return {}; }
+}
+function saveLab(res){ store.set(labStoreKey(), JSON.stringify(res)); }
+function defaultCases(){
+  const out=[];
+  for(const tp of [1.0,1.5,2.0,3.0]) for(const sl of [1.0,1.5,2.5])
+    out.push({tp, sl, ta:+(tp*0.75).toFixed(1), td:+(sl*0.5).toFixed(1)});
+  for(const p of profs)
+    out.push({tp:p.tp, sl:p.sl, ta:p.ta, td:p.td});
+  return out;
+}
+function labCases(res){
+  const map=new Map();
+  for(const c of defaultCases()) map.set(caseKey(c), {params:c, gen:0});
+  for(const k in res) if(!map.has(k)) map.set(k, {params:res[k].params, gen:res[k].gen||0});
+  return [...map.values()];
+}
+// 하루 백테스트 (리플레이 엔진과 동일 규칙: 10분+0.5% 진입, 고저 터치 청산, 장마감 청산)
+function backtestDay(c, dayStks, timeline, rules){
+  const pos={}, traded=new Set(), hist={}, lastC={};
+  let pnl=0, wins=0, tr=0, peak=0, mdd=0, done=false;
+  const closeAt=(code, px)=>{
+    const p=pos[code]; if(!p)return;
+    const g=Math.round((px-p.entry)*p.qty);
+    pnl+=g; tr++; if(g>0)wins++;
+    peak=Math.max(peak,pnl); mdd=Math.min(mdd,pnl-peak);
+    delete pos[code];
+  };
+  for(const t of timeline){
+    const hm=t.slice(8);
+    for(const s of dayStks){
+      const bar=s.map.get(t); if(!bar)continue;
+      lastC[s.code]=bar.c;
+      const p=pos[s.code];
+      if(p && !done){
+        const sl=p.entry*(1-c.sl/100), tp=p.entry*(1+c.tp/100);
+        if(bar.l<=sl) closeAt(s.code, sl);
+        else if(bar.h>=tp) closeAt(s.code, tp);
+        else{
+          if(bar.h>p.peak)p.peak=bar.h;
+          if((p.peak/p.entry-1)*100>=c.ta){
+            const tpx=p.peak*(1-c.td/100);
+            if(bar.l<=tpx) closeAt(s.code, tpx);
+          }
+        }
+      }
+      const H=hist[s.code]||(hist[s.code]=[]);
+      H.push(bar.c); if(H.length>30)H.shift();
+      if(!done && hm<rules.entryEnd && !pos[s.code] && !traded.has(s.code)
+         && Object.keys(pos).length<LAB_MX && H.length>=11
+         && bar.c/H[H.length-11]-1>=0.005){
+        const qty=Math.floor(LAB_BUDGET/bar.c);
+        traded.add(s.code);
+        if(qty>=1) pos[s.code]={entry:bar.c, peak:bar.c, qty};
+      }
+    }
+    if(!done && hm>=rules.liq){
+      for(const code of Object.keys(pos)) closeAt(code, lastC[code]);
+      done=true;
+    }
+  }
+  for(const code of Object.keys(pos)) closeAt(code, lastC[code]);
+  return {tr, w:wins, pnl, mdd};
+}
+window.openLab=()=>{ $('setup').classList.add('hide'); $('lab').classList.remove('hide'); renderLab(); };
+window.closeLab=()=>{ $('lab').classList.add('hide'); $('setup').classList.remove('hide'); };
+window.resetLab=()=>{ if(confirm('이 시장의 누적 결과를 전부 지울까요?')){ saveLab({}); renderLab(); } };
+window.runLab=async()=>{
+  const days=+($('rdays').value||3);
+  const P=pool();
+  $('labmsg').innerText='실데이터 수집 중…';
+  const hists=[];
+  for(let i=0;i<P.length;i++){
+    $('labmsg').innerText=`분봉 수집 ${i+1}/${P.length} — ${P[i].n}`;
+    hists[i]=mkt==='US' ? await fetchHistUS(P[i].y, days)
+                        : await fetchHist(P[i].code, Math.min(days*420+60,4500));
+  }
+  const okIdx=hists.map((h,i)=>h.length>50?i:-1).filter(i=>i>=0);
+  if(okIdx.length<3){ $('labmsg').innerText='분봉 확보 실패 — 전용 프록시 확인 후 재시도'; return; }
+  const allDays=[...new Set(okIdx.flatMap(i=>hists[i].map(b=>b.t.slice(0,8))))].sort().slice(-days);
+  const rules=MKT_RULES[mkt];
+  const res=loadLab();
+  const cases=labCases(res);
+  let evals=0;
+  const t0=Date.now();
+  for(const day of allDays){
+    const dayStks=okIdx.map(i=>{
+      const bars=hists[i].filter(b=>b.t.slice(0,8)===day);
+      return {code:P[i].code, map:new Map(bars.map(b=>[b.t,b]))};
+    }).filter(s=>s.map.size>30);
+    const timeline=[...new Set(dayStks.flatMap(s=>[...s.map.keys()]))].sort();
+    for(const cs of cases){
+      const k=caseKey(cs.params);
+      const r=backtestDay(cs.params, dayStks, timeline, rules);
+      if(!res[k]) res[k]={params:cs.params, gen:cs.gen, days:{}};
+      res[k].days[day]=r;                       // 같은 날짜 재실행 = 덮어씀 (결정적)
+      evals++;
+    }
+  }
+  saveLab(res);
+  $('labmsg').innerText=`완료 — ${allDays.length}일 × ${cases.length}케이스 (${Date.now()-t0}ms) · 날짜 단위로 누적 저장됨`;
+  renderLab();
+};
+function labAgg(e){
+  const ds=Object.values(e.days||{});
+  const nd=ds.length, tr=ds.reduce((a,d)=>a+d.tr,0), w=ds.reduce((a,d)=>a+d.w,0);
+  const pnl=ds.reduce((a,d)=>a+d.pnl,0), worst=ds.length?Math.min(...ds.map(d=>d.mdd)):0;
+  return {nd, tr, w, pnl, worst, wr: tr? w/tr*100:0, avg: nd? pnl/nd:0};
+}
+window.adoptCase=k=>{
+  const res=loadLab(); const e=res[k]; if(!e)return;
+  if(profs.length>=4){ alert('프로파일이 이미 4개 — 하나 지우고 채택하세요'); return; }
+  profs.push({name:'실험'+(profs.length+1), budget:100, tp:e.params.tp, sl:e.params.sl,
+              ta:e.params.ta, td:e.params.td, mx:2});
+  store.set('trial_profs', JSON.stringify(profs)); draw();
+  alert(`채택됨: ${k} → 프로파일 "${profs[profs.length-1].name}"`);
+};
+window.evolveLab=()=>{
+  const res=loadLab();
+  const ranked=Object.keys(res).map(k=>({k, e:res[k], a:labAgg(res[k])}))
+    .filter(x=>x.a.nd>0).sort((x,y)=>y.a.pnl-x.a.pnl);
+  if(ranked.length<3){ $('labmsg').innerText='진화하려면 먼저 [전체 실행]으로 성적을 쌓으세요'; return; }
+  const jit=v=>Math.max(0.3, +(v + [-0.3,-0.2,0.2,0.3][Math.floor(Math.random()*4)]).toFixed(1));
+  let added=0;
+  for(const top of ranked.slice(0,3)){
+    for(let c=0;c<2 && Object.keys(res).length<LAB_CAP;c++){
+      const p=top.e.params;
+      const child={tp:jit(p.tp), sl:jit(p.sl), ta:jit(p.ta), td:Math.max(0.2,+(jit(p.td)).toFixed(1))};
+      const k=caseKey(child);
+      if(!res[k]){ res[k]={params:child, gen:(top.e.gen||0)+1, days:{}}; added++; }
+    }
+  }
+  saveLab(res);
+  $('labmsg').innerText=added?`🧬 ${added}개 변이 생성 (상위 3개 기반) — [전체 실행]으로 성적을 매기세요`
+                             :'변이 슬롯 없음 (최대 24케이스) — 초기화 후 재시작';
+  renderLab();
+};
+function renderLab(){
+  const res=loadLab();
+  const rows=Object.keys(res).map(k=>({k, e:res[k], a:labAgg(res[k])}));
+  for(const c of labCases(res)){                      // 아직 성적 없는 기본/변이 케이스도 표시
+    const k=caseKey(c.params);
+    if(!rows.some(r=>r.k===k)) rows.push({k, e:{params:c.params, gen:c.gen, days:{}}, a:labAgg({days:{}})});
+  }
+  rows.sort((x,y)=>y.a.pnl-x.a.pnl);
+  $('labtbl').innerHTML=rows.map((r,i)=>{
+    const a=r.a;
+    return `<tr><td class="${i===0&&a.nd?'top1':''}">${i===0&&a.nd?'👑':''}${r.k}</td>
+      <td>${r.e.gen||0}</td><td>${a.nd}</td><td>${a.tr}</td>
+      <td>${a.tr?a.wr.toFixed(1)+'%':'-'}</td>
+      <td class="${cls(a.pnl)}">${a.nd?(a.pnl>0?'+':'')+fmt(a.pnl):'-'}</td>
+      <td class="${cls(a.avg)}">${a.nd?(a.avg>0?'+':'')+fmt(a.avg):'-'}</td>
+      <td class="${a.worst<0?'neg':'flat'}">${a.nd?fmt(a.worst):'-'}</td>
+      <td><button class="btn-sub" style="padding:4px 8px;font-size:.68rem" onclick="adoptCase('${r.k}')">채택</button></td></tr>`;
+  }).join('');
 }
 </script></body></html>
