@@ -5,7 +5,7 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="단타봇">
-<title>단타봇 조종석 · 체험판 v4.2</title>
+<title>단타봇 조종석 · 체험판 v4.3</title>
 <style>
 :root{--bg:#0d1420;--card:#18202f;--card2:#141b29;--line:#273349;--tx:#e9eef8;--sub:#8fa3c8;--dim:#5f7396;
       --pos:#ff5b5b;--neg:#4d8dff;--acc:#ffb020;--ok:#3ecf8e}
@@ -62,7 +62,7 @@ input[type=number],input[type=text]{background:#101828;border:1px solid var(--li
 .srow .r2 input{padding:8px 5px;font-size:.84rem}
 </style></head>
 <body>
-<h1>🤖 단타봇 조종석 <small>체험판 v4.2</small></h1>
+<h1>🤖 단타봇 조종석 <small>체험판 v4.3</small></h1>
 <div class="sub"><b style="color:#ffb020">폰 단독 실행 · 실제 시세 기반</b> — 시작 시 네이버 실시세를 받아오고(안되면 오늘자 스냅샷), 그 위에서 실제 매매규칙이 작동합니다. 가상 자금·주문이며 실제 거래가 아닙니다.</div>
 
 <!-- ═══ 설정 ═══ -->
@@ -87,7 +87,8 @@ input[type=number],input[type=text]{background:#101828;border:1px solid var(--li
       <div><label style="margin-top:0">대상 기간 (최근 영업일)</label>
         <select id="rdays" style="width:100%;background:#101828;border:1px solid var(--line);color:var(--tx);border-radius:8px;padding:9px 8px;font-size:.9rem">
           <option value="1">1일</option><option value="3" selected>3일</option>
-          <option value="5">5일</option><option value="10">10일 (제공 한도까지)</option>
+          <option value="5">5일</option><option value="10">10일</option>
+          <option value="20">20일 (청크 수집)</option><option value="30">30일 (최대·느림)</option>
         </select></div>
       <div><label style="margin-top:0">재생 속도</label>
         <select id="rspd" style="width:100%;background:#101828;border:1px solid var(--line);color:var(--tx);border-radius:8px;padding:9px 8px;font-size:.9rem">
@@ -95,7 +96,8 @@ input[type=number],input[type=text]{background:#101828;border:1px solid var(--li
           <option value="300">보통 (0.3초)</option><option value="600">느림 (0.6초)</option>
         </select></div>
     </div>
-    <div class="hint">네이버 분봉은 최근 영업일 일부만 제공됩니다 — 실제 확보된 기간이 시작 후 상단 배지에 표시됩니다.</div>
+    <div class="hint">1분봉 보관 한도는 <b>약 30일</b>입니다(야후). 7일 넘는 기간은 자동으로 나눠 받으므로 수집이 길어집니다(20일 ≈ 30초~1분).
+    실제 확보된 기간은 시작 후 상단 배지에 표시됩니다. 그 이전 과거는 무료 소스가 없어, 키움 API 연동 시 PC에서 가능합니다.</div>
   </div>
 
   <div class="card">
@@ -356,6 +358,44 @@ function parseYahooBars(j, fx){
     return out;
   }catch(e){ return []; }
 }
+async function fetchYahooChunk(sym, p1, p2, fx){
+  // 기간 지정 청크 (period1~period2, 1분봉) — 전용(GAS v7) → 공용
+  if(myProxy){
+    try{
+      const sep=myProxy.includes('?')?'&':'?';
+      const r=await Promise.race([fetch(`${myProxy}${sep}hist=1&symbol=${sym}&p1=${p1}&p2=${p2}&_ts=${Date.now()}_${++bustSeq}`), _tmo(8000)]);
+      if(r.ok){
+        const text=await r.text();
+        let j; try{ j=JSON.parse(text); }catch(e){ j=null; }
+        const bars=j?parseYahooBars(j, fx):[];
+        if(bars.length) return bars;
+        histDiag=`전용: 기간분봉 없음(GAS v7 재배포 필요)`;
+      }
+    }catch(e){ histDiag='전용: 무응답'; }
+  }
+  const api=`https://query1.finance.yahoo.com/v8/finance/chart/${sym}?interval=1m&period1=${p1}&period2=${p2}&_ts=${Date.now()}_${++bustSeq}`;
+  try{ return parseYahooBars(await raceProxies(api, 7000), fx); }
+  catch(e){ histDiag+=' · 공용: 프록시 실패'; return []; }
+}
+async function fetchYahooLong(sym, days, fx){
+  // 야후 1분봉 보관 한도 ≈ 30일 · 요청당 7일 → 청크 분할 후 병합
+  if(days<=6) return fetchYahoo(sym, days, fx);
+  const DAY=86400, now=Math.floor(Date.now()/1000);
+  const span=Math.min(days+3, 30)*DAY;           // 주말·휴일 여유
+  const chunks=[];
+  for(let end=now; end>now-span; end-=7*DAY) chunks.push([Math.max(now-span, end-7*DAY), end]);
+  const seen=new Map();
+  for(const [p1,p2] of chunks){
+    const bars=await fetchYahooChunk(sym, p1, p2, fx);
+    for(const b of bars) seen.set(b.t, b);        // 경계 중복 제거
+  }
+  let all=[...seen.values()].sort((a,b)=>a.t<b.t?-1:1);
+  if(all.length){                                  // 가장 오래된 날이 반쪽(장중부터)이면 제거
+    const d0=all[0].t.slice(0,8);
+    if(all[0].t.slice(8) > '0935') all=all.filter(b=>b.t.slice(0,8)!==d0);
+  }
+  return all;
+}
 async function fetchYahoo(sym, days, fx){
   // 전용(GAS v6: hist=1&symbol=...&days=) → 공용 프록시 순
   const d=Math.min(days+1,7);
@@ -380,11 +420,11 @@ async function fetchYahoo(sym, days, fx){
   }catch(e){ histDiag+=' · 공용: 프록시 실패'; }
   return [];
 }
-async function fetchHistUS(sym, days){ histDiag=''; return fetchYahoo(sym, days, FX); }
+async function fetchHistUS(sym, days){ histDiag=''; return fetchYahooLong(sym, days, FX); }
 async function fetchHist(symbol, count, days){
   histDiag='';
   // 1순위: 야후 국내(.KS) 1분봉 — 네이버 구형 분봉 경로 폐쇄 대응
-  const yb=await fetchYahoo(symbol+'.KS', days||3, 1);
+  const yb=await fetchYahooLong(symbol+'.KS', days||3, 1);
   if(yb.length) return yb;
   const yDiag=histDiag;
   // 2순위: 네이버 레거시 (혹시 살아있는 환경 대비)
@@ -924,10 +964,11 @@ window.runLab=async()=>{
   const P=pool();
   $('labmsg').innerText='실데이터 수집 중…';
   const hists=[];
+  const chunkNote = days>6 ? ` · ${Math.ceil((days+3)/7)}청크 분할` : '';
   for(let i=0;i<P.length;i++){
-    $('labmsg').innerText=`분봉 수집 ${i+1}/${P.length} — ${P[i].n}`;
+    $('labmsg').innerText=`분봉 수집 ${i+1}/${P.length} — ${P[i].n}${chunkNote}`;
     hists[i]=mkt==='US' ? await fetchHistUS(P[i].y, days)
-                        : await fetchHist(P[i].code, Math.min(days*420+60,4500));
+                        : await fetchHist(P[i].code, Math.min(days*420+60,4500), days);
   }
   const okIdx=hists.map((h,i)=>h.length>50?i:-1).filter(i=>i>=0);
   if(okIdx.length<3){ $('labmsg').innerText='분봉 확보 실패 — '+(histDiag||'프록시 문제')+' · 설정의 [연결 테스트]에서 분봉 검사'; return; }
